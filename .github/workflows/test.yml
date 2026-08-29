@@ -15,12 +15,44 @@ permissions:
   contents: read
 
 env:
-  # ChronoVault's own scripts print box-drawing / check-mark characters.
-  # Force UTF-8 for stdout/stderr so a runner whose locale would otherwise
-  # be ASCII (some Linux images) can't crash the run on a print().
+  # ChronoVault's scripts print box-drawing / check-mark characters, and
+  # build_single_file.py reads UTF-8 source files with Python's *default*
+  # open() encoding -- which is cp1252 on a stock Windows runner for
+  # Python 3.10-3.13. Force UTF-8 mode everywhere so the amalgamation
+  # can't be mojibake'd on Windows and no script crashes on a print().
+  PYTHONUTF8: "1"
   PYTHONIOENCODING: utf-8
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Zero-dependency proof. Runs ONCE (not per matrix cell): the AST import
+  # scan and the requirements.txt check are identical on every OS / Python.
+  # ---------------------------------------------------------------------------
+  dependency-check:
+    name: zero-dependency proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: requirements.txt must be empty
+        run: |
+          python -c "import pathlib, sys; p = pathlib.Path('requirements.txt'); body = [l for l in (p.read_text().splitlines() if p.exists() else []) if l.strip() and not l.lstrip().startswith('#')]; print('requirements.txt effective lines:', body); sys.exit('FAIL: requirements.txt is not empty: %r' % body if body else 0)"
+
+      - name: No non-stdlib imports anywhere (scripts/check_dependencies.py)
+        run: python scripts/check_dependencies.py
+
+  # ---------------------------------------------------------------------------
+  # Full proof matrix: every claim, on 5 Python versions x {Linux, Windows}.
+  # Windows is first-class -- this project has a documented history of bugs
+  # that only reproduce on real Windows filesystems (see README's bug story).
+  # ---------------------------------------------------------------------------
   test:
     name: py${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -28,12 +60,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows is not optional here: this project has a documented
-        # history of bugs that only reproduce on real Windows filesystems
-        # (see the bug-finding story in README.md), so every Python
-        # version is exercised on both platforms.
         os: [ubuntu-latest, windows-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - name: Check out the code
@@ -47,11 +75,88 @@ jobs:
       - name: Report Python version
         run: python --version
 
-      # ChronoVault is a zero-dependency project: there is deliberately
-      # no `pip install` step. check_dependencies.py is the proof --
-      # it AST-scans every .py file and fails if any import is not stdlib.
-      - name: Zero-dependency proof
-        run: python scripts/check_dependencies.py
+      # Claim: the real CLI runs with NOTHING outside the stdlib reachable.
+      # `python -I` disables PYTHONPATH + user/system site-packages, so a
+      # third-party import could not be silently satisfied. This is the same
+      # sequence as scripts/prove_isolated_mode.sh, driven by a single
+      # `python -c` process so it needs no bash on the Windows runner and
+      # any failing sub-command fails the step (subprocess check=True).
+      - name: Isolated-mode proof (python -I; no site-packages, no PYTHONPATH)
+        run: |
+          python -c "
+          import subprocess, sys, pathlib, os, tempfile
+          entry = str(pathlib.Path('scripts/_isolated_entry.py').resolve())
+          os.chdir(tempfile.mkdtemp())
+          base = [sys.executable, '-I', entry]
+          pathlib.Path('app.py').write_text('def main():\n    return 42\n')
+          subprocess.run(base + ['init', '.'], check=True)
+          subprocess.run(base + ['snapshot', '-m', 'isolated mode test'], check=True)
+          pathlib.Path('app.py').write_text('def main():\n    return 43  # changed\n')
+          subprocess.run(base + ['snapshot', '-m', 'second snapshot'], check=True)
+          subprocess.run(base + ['diff', '1', '2'], check=True)
+          subprocess.run(base + ['restore', '1'], input='RESTORE\n', text=True, check=True)
+          subprocess.run(base + ['verify'], check=True)
+          print('OK: full snapshot/restore/verify cycle ran under python -I')
+          "
+
+      # Claim: the single-file build is reproducible. Two independent
+      # invocations of scripts/build_single_file.py (its output path is
+      # fixed at <repo>/dist/, so each result is copied to its own temp
+      # location) must be byte-for-byte identical by sha256.
+      - name: Reproducible single-file build (sha256 of two independent builds)
+        run: |
+          python -c "
+          import subprocess, sys, hashlib, pathlib, tempfile, shutil, os
+          artifact = pathlib.Path('dist/chronovault_single.py')
+          d = tempfile.mkdtemp()
+          first = os.path.join(d, 'build_1.py')
+          second = os.path.join(d, 'build_2.py')
+          subprocess.run([sys.executable, 'scripts/build_single_file.py'], check=True)
+          shutil.copy(artifact, first)
+          subprocess.run([sys.executable, 'scripts/build_single_file.py'], check=True)
+          shutil.copy(artifact, second)
+          h1 = hashlib.sha256(open(first, 'rb').read()).hexdigest()
+          h2 = hashlib.sha256(open(second, 'rb').read()).hexdigest()
+          print('build 1:', first, h1)
+          print('build 2:', second, h2)
+          sys.exit(0 if h1 == h2 else 'FAIL: single-file build is not byte-identical across two runs')
+          "
+
+      # Claim: the generated single file is a working, equivalent CLI.
+      # This replicates scripts/verify_single_file.sh's exact 11 checks
+      # (init, snapshot x2, diff, log, pack, verify, restore, snapshot-rm,
+      # gc, benchmark, stress-test) with plain python -- one process, so it
+      # runs identically on Ubuntu and Windows with no bash dependency.
+      - name: Single-file verification (equivalent of verify_single_file.sh)
+        run: |
+          python -c "
+          import subprocess, sys, pathlib, os, tempfile, re
+          subprocess.run([sys.executable, 'scripts/build_single_file.py'], check=True)
+          single = str(pathlib.Path('dist/chronovault_single.py').resolve())
+          os.chdir(tempfile.mkdtemp())
+          cli = [sys.executable, single]
+          subprocess.run(cli + ['init', '.'], check=True)
+          pathlib.Path('app.py').write_text('content v1\n')
+          subprocess.run(cli + ['snapshot', '-m', 'v1'], check=True)
+          pathlib.Path('app.py').write_text('content v2 edited\n')
+          subprocess.run(cli + ['snapshot', '-m', 'v2'], check=True)
+          subprocess.run(cli + ['diff', '1', '2'], check=True)
+          subprocess.run(cli + ['log', 'app.py'], check=True)
+          subprocess.run(cli + ['pack'], check=True)
+          subprocess.run(cli + ['verify'], check=True)
+          os.remove('app.py')
+          subprocess.run(cli + ['restore', '2'], input='RESTORE\n', text=True, check=True)
+          restored = pathlib.Path('app.py').read_text()
+          assert restored == 'content v2 edited\n', 'restore not byte-correct: ' + repr(restored)
+          subprocess.run(cli + ['snapshot-rm', '1'], check=True)
+          subprocess.run(cli + ['gc'], check=True)
+          subprocess.run(cli + ['benchmark'], check=True)
+          stress = subprocess.run(cli + ['stress-test', '--processes', '8'], capture_output=True, text=True)
+          out = stress.stdout + stress.stderr
+          print(out)
+          ok = stress.returncode == 0 and re.search(r'Unique IDs:\s+8(?!\d)', out) and 'Result: PASS' in out
+          sys.exit(0 if ok else 'FAIL: single-file stress-test did not report 8 unique IDs + PASS')
+          "
 
       - name: Run the full test suite
         run: python -m unittest discover tests -v
