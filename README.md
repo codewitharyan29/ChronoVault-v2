@@ -2,7 +2,7 @@
 
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
-![Tests](https://img.shields.io/badge/tests-241%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-247%20passing-brightgreen)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 [![CI](https://github.com/codewitharyan29/ChronoVault-v2/actions/workflows/test.yml/badge.svg)](https://github.com/codewitharyan29/ChronoVault-v2/actions/workflows/test.yml)
 
@@ -34,7 +34,7 @@ Delete everything, get it back exactly. Corrupt one object, and the
 system refuses to silently restore bad data — it tells you and stops.
 
 ```
-✓ 243 tests            ✓ Concurrent-process safe
+✓ 249 tests            ✓ Concurrent-process safe
 ✓ Corruption-safe restore   ✓ Tree-diff-derived delta compression
 ```
 
@@ -438,7 +438,7 @@ data, and here is the proof it no longer can."
 
 ```bash
 make verify-deps    # confirm zero external dependencies, from source
-make test            # full 243-test suite (241 pass, 2 skipped -- Windows symlink-privilege limitation, not a failure)
+make test            # full 249-test suite (247 pass, 2 skipped -- Windows symlink-privilege limitation, not a failure)
 make demo-v2          # reproduce the v2 demo and benchmark numbers above
 ```
 
@@ -449,7 +449,7 @@ not these ones.
 
 ### Testing
 
-243 tests (241 passing, 2 skipped — a Windows-only symlink-privilege
+249 tests (247 passing, 2 skipped — a Windows-only symlink-privilege
 limitation, not a failure), `python3 -m unittest discover tests -v`
 (`python` instead of `python3` on Windows). Covers everything v1
 covered, plus:
@@ -651,6 +651,26 @@ index, corrupt-but-parseable index, missing index, healthy pack
 beside a quarantined one), which also guards that a **perfectly
 healthy** repo is byte-for-byte unchanged by this logic.
 
+**How crash-safe is `vault snapshot`? (proven, not argued.)** A hard
+crash — power loss, `SIGKILL` — at *any* point during
+`create_snapshot` leaves the repository with the snapshot either
+**fully present and valid** or **fully absent**, never half-written.
+This falls out of the same atomic-rename pattern the object store
+uses: every object is written temp-file-then-`os.replace()`, and the
+snapshot record — the *only* thing that makes a snapshot "exist" —
+is the last write, promoted by a single `os.replace()` that is
+atomic on POSIX and Windows. Crash before that rename → no record →
+the snapshot never happened (a few unreferenced objects may be left
+behind; `vault gc` collects them, and they are valid objects, not
+corruption). Crash after → the record is intact and the snapshot
+loads, verifies, and restores.
+`tests/test_v2_snapshot_crash_safety.py` proves this by killing a
+real subprocess (via `os._exit`, which — like `SIGKILL` — runs no
+`finally`, no `atexit`, no flush) at each of those points and
+asserting the on-disk result: `test_crash_before_final_replace_snapshot_is_fully_absent`
+and `test_crash_after_final_replace_snapshot_is_fully_committed` are
+the two halves.
+
 **Why do `benchmark` and `stress-test` never touch the real
 repository?** So they're safe to run repeatedly, including live in
 front of a judge, without any risk to actual data — both operate
@@ -693,6 +713,18 @@ dedup only, symlinks skipped, no encryption). v2 adds:
   and snapshots are affected; recovering them requires a copy from
   elsewhere. There is no redundancy or parity within a single
   repository — that is out of scope, same as encryption.
+- **A crash mid-`snapshot` can burn a snapshot id, and can leave one
+  stale temp file.** Snapshot ids come from a monotonic on-disk
+  counter (never `max(existing)+1` — deliberate, so an id always
+  refers to at most one snapshot for the life of the repo, even
+  across deletes). The counter is bumped *before* the snapshot record
+  is written, so a crash in that window permanently skips an id: you
+  might see snapshots `1, 2, 4` with no `3`. This is harmless — no
+  corruption, later snapshots proceed normally — and is asserted by
+  `test_v2_snapshot_crash_safety.py::test_burned_id_after_counter_bump_is_harmless_and_permanent`.
+  The same crash window can also leave a `.vault/snapshots/.tmp-N`
+  file (the half-promoted record); it is inert — every command
+  ignores non-digit filenames — but nothing currently sweeps it.
 - **Rename detection in `vault log` is content-identical only.** As of
   v2.1 the path-history index *does* follow renames: when a file
   disappears from one path and a byte-for-byte identical file (same
@@ -784,7 +816,7 @@ chronovault/
 |       |-- path_history.py        the `vault log` index
 |       |-- benchmark_cmd.py       powers `vault benchmark`
 |       `-- stress_test_cmd.py     powers `vault stress-test`
-|-- tests/                  243 tests, stdlib unittest only
+|-- tests/                  249 tests, stdlib unittest only
 |-- STDLIB.md               every stdlib-for-package substitution (v1, still accurate)
 |-- FORMAT.md               binary object/snapshot format (v1, still accurate)
 |-- ARCHITECTURE.md         v1's original per-layer breakdown
