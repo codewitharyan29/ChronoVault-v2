@@ -1,0 +1,38 @@
+Scanning 52 Python file(s)...
+
+Standard library modules used:
+  __future__           ✓ stdlib
+  argparse             ✓ stdlib
+  ast                  ✓ stdlib
+  bisect               ✓ stdlib
+  ctypes               ✓ stdlib
+  dataclasses          ✓ stdlib
+  datetime             ✓ stdlib
+  hashlib              ✓ stdlib
+  http                 ✓ stdlib
+  json                 ✓ stdlib
+  multiprocessing      ✓ stdlib
+  os                   ✓ stdlib
+  pathlib              ✓ stdlib
+  random               ✓ stdlib
+  re                   ✓ stdlib
+  shutil               ✓ stdlib
+  socketserver         ✓ stdlib
+  struct               ✓ stdlib
+  subprocess           ✓ stdlib
+  sys                  ✓ stdlib
+  tempfile             ✓ stdlib
+  textwrap             ✓ stdlib
+  threading            ✓ stdlib
+  time                 ✓ stdlib
+  typing               ✓ stdlib
+  unittest             ✓ stdlib
+  urllib               ✓ stdlib
+  venv                 ✓ stdlib
+  zlib                 ✓ stdlib
+
+External dependencies found:
+
+  NONE
+
+Status: ZERO DEPENDENCY VERIFIED

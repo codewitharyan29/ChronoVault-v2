@@ -1,0 +1,24 @@
+track = "Track D — Data & Storage"
+pitch = "ChronoVault is a zero-dependency, content-addressable snapshot/recovery engine built entirely on Python's standard library, where the storage, dedup, delta-compression, and concurrency mechanics are implemented and provable, not delegated to Git or SQLite."
+
+# Bonus claims, each with a re-runnable proof. Point values per the
+# Zero Dep Hack Track D rubric. Total claimed: +16.
+[[bonus]]
+name = "STDLIB Log"
+points = 3
+proof = "STDLIB.md — 14 documented stdlib-for-package substitutions, count verified by table-row scan, not a manual claim."
+
+[[bonus]]
+name = "Package Killer"
+points = 3
+proof = "STDLIB.md 'Package Killer' section + scripts/benchmark_vs_diskcache.py — vault/objects.py replaces diskcache; benchmarked against the real package in a throwaway isolated venv (never a runtime dependency). ~5x smaller on disk out of the box, ~47x smaller on a realistic repeated-snapshot workload; throughput cost reported honestly."
+
+[[bonus]]
+name = "Reproducible Build"
+points = 5
+proof = "tests/test_reproducible_build.py (5 tests) + scripts/prove_reproducible.py — identical input yields byte-for-byte identical object hashes and stored bytes across fully independent runs. Scoped: excludes the snapshot record's wall-clock timestamp, which legitimately varies."
+
+[[bonus]]
+name = "Single File"
+points = 5
+proof = "scripts/build_single_file.py generates dist/chronovault_single.py from the modular source; scripts/verify_single_file.sh runs an 11-step end-to-end proof (incl. 8 concurrent subprocesses) against the generated file. `make verify-single`."

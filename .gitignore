@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.vault/
+.ruff_cache/
+.mypy_cache/
+demo-project/
+dist/
+.claude/
