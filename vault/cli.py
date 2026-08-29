@@ -111,6 +111,17 @@ def _engine_and_source(args: argparse.Namespace):
     # `vault pack` silently breaks `verify` and `restore` -- found by
     # real end-to-end CLI testing, see pack_aware_store.py's docstring.
     engine.store = PackAwareObjectStore(vault_dir)
+    # A corrupt/truncated pack is quarantined (skipped) rather than
+    # crashing the engine -- but the repository is now degraded, so
+    # say so on every command until it is dealt with. Detail (which
+    # objects became unreachable) comes from `vault recover-check`.
+    for qp in getattr(engine.store, "quarantined_packs", []):
+        print(f"⚠  pack '{qp.name}' is quarantined and will not be used — {qp.reason}",
+              file=sys.stderr)
+        if qp.hashes:
+            print(f"   {len(qp.hashes)} object(s) it held are unreachable unless a loose "
+                  f"copy still exists; run 'vault recover-check <snapshot>' to see the impact.",
+                  file=sys.stderr)
     return engine, source_dir
 
 
@@ -300,6 +311,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
     corrupted = [h for h in all_hashes if not store.verify_object(h)]
     elapsed = time.perf_counter() - start
 
+    quarantined = list(getattr(store, "quarantined_packs", []))
+
     print(f"Checking {len(all_hashes)} object(s)...")
     print()
     if corrupted:
@@ -307,12 +320,19 @@ def cmd_verify(args: argparse.Namespace) -> int:
         for h in corrupted:
             print(f"    {h}")
         print()
+    if quarantined:
+        print(f"✗ {len(quarantined)} pack(s) quarantined (corrupt/truncated, skipped):")
+        for qp in quarantined:
+            print(f"    {qp.name} — {qp.reason}")
+        print("  Objects that lived ONLY in a quarantined pack are unrecoverable.")
+        print("  Run 'vault recover-check <snapshot>' to see which snapshots are affected.")
+        print()
+    if corrupted or quarantined:
         print(f"Repository integrity FAILED. ({elapsed:.3f}s)")
         return 1
-    else:
-        print(f"✓ All {len(all_hashes)} objects verified ({elapsed:.3f}s)")
-        print("Repository healthy.")
-        return 0
+    print(f"✓ All {len(all_hashes)} objects verified ({elapsed:.3f}s)")
+    print("Repository healthy.")
+    return 0
 
 
 def cmd_recover_check(args: argparse.Namespace) -> int:

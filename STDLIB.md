@@ -287,7 +287,7 @@ dependency checker).
 
 **What this is NOT claiming:** that the real project is (or should
 be) a single file. The modular source under `vault/` remains the
-actual, primary codebase — tested by all 232 tests, documented,
+actual, primary codebase — tested by all 243 tests, documented,
 reviewed across many rounds. `dist/chronovault_single.py` is a
 *generated build artifact*, in the same spirit as SQLite's own
 `sqlite3.c` amalgamation: SQLite's real source is hundreds of files;

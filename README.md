@@ -2,7 +2,7 @@
 
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
-![Tests](https://img.shields.io/badge/tests-230%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-241%20passing-brightgreen)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 [![CI](https://github.com/codewitharyan29/ChronoVault-v2/actions/workflows/test.yml/badge.svg)](https://github.com/codewitharyan29/ChronoVault-v2/actions/workflows/test.yml)
 
@@ -34,7 +34,7 @@ Delete everything, get it back exactly. Corrupt one object, and the
 system refuses to silently restore bad data — it tells you and stops.
 
 ```
-✓ 232 tests            ✓ Concurrent-process safe
+✓ 243 tests            ✓ Concurrent-process safe
 ✓ Corruption-safe restore   ✓ Tree-diff-derived delta compression
 ```
 
@@ -438,7 +438,7 @@ data, and here is the proof it no longer can."
 
 ```bash
 make verify-deps    # confirm zero external dependencies, from source
-make test            # full 232-test suite (230 pass, 2 skipped -- Windows symlink-privilege limitation, not a failure)
+make test            # full 243-test suite (241 pass, 2 skipped -- Windows symlink-privilege limitation, not a failure)
 make demo-v2          # reproduce the v2 demo and benchmark numbers above
 ```
 
@@ -449,7 +449,7 @@ not these ones.
 
 ### Testing
 
-232 tests (230 passing, 2 skipped — a Windows-only symlink-privilege
+243 tests (241 passing, 2 skipped — a Windows-only symlink-privilege
 limitation, not a failure), `python3 -m unittest discover tests -v`
 (`python` instead of `python3` on Windows). Covers everything v1
 covered, plus:
@@ -631,6 +631,26 @@ repository state. Read-only commands (`list`, `diff`, `status`,
 gain nothing from serialization and would only pay latency for no
 correctness benefit.
 
+**What happens if a pack file is corrupted or truncated?** It is
+**quarantined**, not fatal. At load time `PackAwareObjectStore`
+structurally validates every pack — index parses, `.pack` carries
+its magic, every index entry's byte range lies inside the file — in
+O(entries) integer checks with no object decoding, so a healthy pack
+pays effectively nothing. A pack that fails is *skipped and
+recorded*, not trusted: the engine keeps running, every other pack
+and all loose objects keep serving, and every command prints a
+`⚠ pack '…' is quarantined` line until it's dealt with.
+`vault verify` then reports `FAILED` and lists the quarantined
+pack(s); `vault recover-check <snapshot>` names the exact objects a
+snapshot can no longer reach because of it. Being precise about the
+limit: an object that was pruned from loose storage after packing and
+lived *only* in a now-corrupt pack is genuinely unrecoverable — this
+is surfaced plainly, never papered over as "falls back to loose."
+Proven by `tests/test_experimental_pack_quarantine.py` (truncated
+index, corrupt-but-parseable index, missing index, healthy pack
+beside a quarantined one), which also guards that a **perfectly
+healthy** repo is byte-for-byte unchanged by this logic.
+
 **Why do `benchmark` and `stress-test` never touch the real
 repository?** So they're safe to run repeatedly, including live in
 front of a judge, without any risk to actual data — both operate
@@ -664,6 +684,15 @@ dedup only, symlinks skipped, no encryption). v2 adds:
 - **Delta compression is single-level, transaction-scoped to one
   `vault pack` run** — deltas aren't re-evaluated against newer bases
   in later `pack` runs.
+- **A corrupted pack is survivable but not self-healing.** A pack that
+  fails structural validation is quarantined (skipped, reported) so
+  the engine never bricks — but ChronoVault does not rebuild it, and
+  any object that lived *only* in that pack (i.e. was pruned from
+  loose storage after a successful pack) is permanently gone. `vault
+  verify` and `vault recover-check` tell you exactly which objects
+  and snapshots are affected; recovering them requires a copy from
+  elsewhere. There is no redundancy or parity within a single
+  repository — that is out of scope, same as encryption.
 - **Rename detection in `vault log` is content-identical only.** As of
   v2.1 the path-history index *does* follow renames: when a file
   disappears from one path and a byte-for-byte identical file (same
@@ -755,7 +784,7 @@ chronovault/
 |       |-- path_history.py        the `vault log` index
 |       |-- benchmark_cmd.py       powers `vault benchmark`
 |       `-- stress_test_cmd.py     powers `vault stress-test`
-|-- tests/                  232 tests, stdlib unittest only
+|-- tests/                  243 tests, stdlib unittest only
 |-- STDLIB.md               every stdlib-for-package substitution (v1, still accurate)
 |-- FORMAT.md               binary object/snapshot format (v1, still accurate)
 |-- ARCHITECTURE.md         v1's original per-layer breakdown

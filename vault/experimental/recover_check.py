@@ -69,8 +69,9 @@ class RecoverReport:
     root_tree_hash: str = ""
     metadata_ok: bool = False
     objects_checked: int = 0     # unique object hashes referenced by the tree
-    packed_objects: int = 0      # of those, how many live in a pack
+    packed_objects: int = 0      # of those, how many live in a HEALTHY pack
     delta_dependencies: int = 0  # objects in this snapshot stored as a delta
+    quarantined_packs: list = field(default_factory=list)  # [(name, reason)]
     issues: list[RecoverIssue] = field(default_factory=list)
 
     @property
@@ -79,20 +80,31 @@ class RecoverReport:
 
 
 def _walk_tree(engine: SnapshotEngine, tree_hash: str, prefix: str,
-               nodes: list, issues: list[RecoverIssue]) -> None:
+               nodes: list, issues: list[RecoverIssue],
+               stranded_in: dict | None = None,
+               quarantined_names: list | None = None) -> None:
     """Collect (path, kind, obj_hash) for the tree object itself and
     every entry beneath it. A tree that can't be loaded -- missing,
-    hash-mismatched, structurally corrupt, or containing an unsafe
-    entry name -- is reported as one issue and its subtree is skipped
-    (the rest of the snapshot is still audited)."""
+    hash-mismatched, structurally corrupt, containing an unsafe entry
+    name, or stranded in a quarantined pack -- is reported as one
+    issue and its subtree is skipped (the rest of the snapshot is
+    still audited)."""
+    stranded_in = stranded_in or {}
     path = prefix.rstrip("/") or "."
     try:
         entries = engine.load_tree(tree_hash)
     except (ObjectNotFoundError, ObjectCorruptedError) as e:
+        detail = str(e).splitlines()[0]
+        if tree_hash in stranded_in:
+            name, reason = stranded_in[tree_hash]
+            detail = (f"directory-tree object is stranded in quarantined pack "
+                      f"'{name}' ({reason}) -- this subtree cannot be read")
+        elif quarantined_names and "not found" in detail:
+            detail += f" (quarantined pack(s) [{', '.join(quarantined_names)}] may have held it)"
         issues.append(RecoverIssue(
             where=f"{path} (directory tree)" if path != "." else "(snapshot root tree)",
             obj_hash=tree_hash,
-            detail=str(e).splitlines()[0],
+            detail=detail,
         ))
         return
 
@@ -126,9 +138,22 @@ def check_snapshot_recoverable(engine: SnapshotEngine, snap_id: int) -> RecoverR
         ))
         return report
 
+    # Feature 2: packs skipped because they failed structural validation.
+    # An object with no loose copy that lived only in a quarantined
+    # pack is genuinely unrecoverable -- diagnose that precisely, not
+    # just as "missing".
+    quarantined = list(getattr(store, "quarantined_packs", []))
+    report.quarantined_packs = [(qp.name, qp.reason) for qp in quarantined]
+    quarantined_names = [qp.name for qp in quarantined]
+    stranded_in: dict = {}
+    for qp in quarantined:
+        for qh in getattr(qp, "hashes", ()):  # populated only when the .idx parsed
+            stranded_in.setdefault(qh, (qp.name, qp.reason))
+
     # 2 + 6. walk the tree: object refs, tree readability, entry-name safety
     nodes: list = []
-    _walk_tree(engine, record.root_tree_hash, "", nodes, report.issues)
+    _walk_tree(engine, record.root_tree_hash, "", nodes, report.issues,
+               stranded_in, quarantined_names)
 
     # unique object hashes, with the first path each was seen at (for diagnostics)
     first_path: dict = {}
@@ -149,6 +174,17 @@ def check_snapshot_recoverable(engine: SnapshotEngine, snap_id: int) -> RecoverR
             pass
     report.packed_objects = len(first_path.keys() & packed_hashes)
 
+    def _missing_detail(h: str, loc: str) -> str:
+        if h in stranded_in:
+            name, reason = stranded_in[h]
+            return (f"stranded in quarantined pack '{name}' ({reason}); "
+                    f"no loose copy exists — this object is unrecoverable")
+        if quarantined:
+            names = ", ".join(qp.name for qp in quarantined)
+            return (f"referenced object is missing from the store{loc} "
+                    f"(note: quarantined pack(s) [{names}] may have held it)")
+        return f"referenced object is missing from the store{loc}"
+
     # 3. every referenced object exists AND reads back intact (loose or packed)
     for h, path in first_path.items():
         if kind_of[h] == "tree":
@@ -158,8 +194,7 @@ def check_snapshot_recoverable(engine: SnapshotEngine, snap_id: int) -> RecoverR
             report.issues.append(RecoverIssue(path, h, "referenced hash is not well-formed"))
             continue
         if not store.has(h):
-            report.issues.append(RecoverIssue(
-                path, h, f"referenced object is missing from the store{loc}"))
+            report.issues.append(RecoverIssue(path, h, _missing_detail(h, loc)))
             continue
         if not store.verify_object(h):
             report.issues.append(RecoverIssue(
@@ -180,9 +215,13 @@ def check_snapshot_recoverable(engine: SnapshotEngine, snap_id: int) -> RecoverR
                 f"delta base for {target_path}", str(base),
                 "delta base hash in the manifest is malformed"))
         elif not store.has(base):
-            report.issues.append(RecoverIssue(
-                f"delta base for {target_path}", base,
-                "delta base object is missing -- this object cannot be reconstructed"))
+            if base in stranded_in:
+                name, reason = stranded_in[base]
+                detail = (f"delta base is stranded in quarantined pack '{name}' "
+                          f"({reason}) -- this object cannot be reconstructed")
+            else:
+                detail = "delta base object is missing -- this object cannot be reconstructed"
+            report.issues.append(RecoverIssue(f"delta base for {target_path}", base, detail))
         elif not store.verify_object(base):
             report.issues.append(RecoverIssue(
                 f"delta base for {target_path}", base,
@@ -205,6 +244,10 @@ def format_recover_report(report: RecoverReport) -> str:
     lines.append(f"  {report.packed_objects} packed")
     lines.append(f"  {report.delta_dependencies} delta dependencies")
     lines.append(f"  {len(report.issues)} integrity errors")
+    if report.quarantined_packs:
+        lines.append(f"  {len(report.quarantined_packs)} quarantined pack(s) "
+                     f"(skipped as corrupt): "
+                     + ", ".join(name for name, _ in report.quarantined_packs))
 
     if report.issues:
         lines.append("")
