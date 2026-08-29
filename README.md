@@ -2,7 +2,7 @@
 
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
-![Tests](https://img.shields.io/badge/tests-218%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-230%20passing-brightgreen)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 [![CI](https://github.com/codewitharyan29/ChronoVault-v2/actions/workflows/test.yml/badge.svg)](https://github.com/codewitharyan29/ChronoVault-v2/actions/workflows/test.yml)
 
@@ -34,7 +34,7 @@ Delete everything, get it back exactly. Corrupt one object, and the
 system refuses to silently restore bad data — it tells you and stops.
 
 ```
-✓ 220 tests            ✓ Concurrent-process safe
+✓ 232 tests            ✓ Concurrent-process safe
 ✓ Corruption-safe restore   ✓ Tree-diff-derived delta compression
 ```
 
@@ -318,11 +318,14 @@ full breakdown is in **[What's actually novel here](#whats-actually-novel-here)*
 | **Delta compression** | ChronoVault's tree-diff-derived base selection is deterministic and path-aware, with a genuine size-based fallback | Real space savings on evolving files (never forces a worse encoding than plain compression) |
 | **Path-history index** | Answers "show me every version of this file" with a direct index instead of re-walking snapshot history on every query; **v2.1: follows content-identical renames** | 574x faster indexed lookup (0.0169 ms vs. 9.68 ms, 200 snapshots, benchmark workload) |
 
-**Command count:** v1: 15 commands. v2: +4 commands. Total: 19.
+**Command count:** v1: 15 commands. v2: +4 commands (+1 in v2.1).
+Total: 20.
 
 All 15 v1 commands retain their original behavior and continue to
-work in v2 (see Testing below). v2 adds 4:
-`pack`, `log`, `benchmark`, `stress-test`.
+work in v2 (see Testing below). v2 adds 4 —
+`pack`, `log`, `benchmark`, `stress-test` — and v2.1 adds a fifth,
+`recover-check` (a strictly read-only pre-restore audit for one
+snapshot; see the Commands table in §7).
 
 ### Code-quality discipline: five bugs found → reproduced → fixed → regression-locked
 
@@ -435,7 +438,7 @@ data, and here is the proof it no longer can."
 
 ```bash
 make verify-deps    # confirm zero external dependencies, from source
-make test            # full 220-test suite (218 pass, 2 skipped -- Windows symlink-privilege limitation, not a failure)
+make test            # full 232-test suite (230 pass, 2 skipped -- Windows symlink-privilege limitation, not a failure)
 make demo-v2          # reproduce the v2 demo and benchmark numbers above
 ```
 
@@ -446,7 +449,7 @@ not these ones.
 
 ### Testing
 
-220 tests (218 passing, 2 skipped — a Windows-only symlink-privilege
+232 tests (230 passing, 2 skipped — a Windows-only symlink-privilege
 limitation, not a failure), `python3 -m unittest discover tests -v`
 (`python` instead of `python3` on Windows). Covers everything v1
 covered, plus:
@@ -491,7 +494,7 @@ See `BENCHMARKS.md` for v1's original large-scale benchmarks
 ## 6. Architecture
 
 ```
-                         vault CLI (19 commands)
+                         vault CLI (20 commands)
                                  |
         +------------------------+------------------------+
         |                        |                         |
@@ -554,6 +557,7 @@ write to temp file, atomic rename into place
 | `diff <a> <b>` | Show changes between two snapshots |
 | `restore <id> [--preview]` | Restore files from a snapshot |
 | `verify` | Re-hash every object, report corruption |
+| `recover-check <id>` *(v2.1)* | **Read-only** pre-restore audit of one snapshot: metadata well-formed, every referenced object present and intact (loose *and* packed), delta bases resolvable, entry names path-safe. Modifies nothing; exits non-zero and names each fault if the snapshot could not be fully restored. Built entirely from the existing `verify` / tree-walk / delta-manifest logic. |
 
 **Inspection:**
 
@@ -620,12 +624,12 @@ recurse into another delta) — a chain would mean a lost/corrupted
 object cascades to every object delta-encoded against it, transitively.
 Not worth the compression gain at this project's scale.
 
-**Why does locking wrap only 5 commands, not all 19?** Only
+**Why does locking wrap only 5 commands, not all 20?** Only
 `snapshot`, `snapshot-rm`, `restore`, `gc`, and `tag` mutate
 repository state. Read-only commands (`list`, `diff`, `status`,
-`explain`, `trace`, `verify`, `info`, `serve`, `log`) gain nothing
-from serialization and would only pay latency for no correctness
-benefit.
+`explain`, `trace`, `verify`, `recover-check`, `info`, `serve`, `log`)
+gain nothing from serialization and would only pay latency for no
+correctness benefit.
 
 **Why do `benchmark` and `stress-test` never touch the real
 repository?** So they're safe to run repeatedly, including live in
@@ -751,7 +755,7 @@ chronovault/
 |       |-- path_history.py        the `vault log` index
 |       |-- benchmark_cmd.py       powers `vault benchmark`
 |       `-- stress_test_cmd.py     powers `vault stress-test`
-|-- tests/                  220 tests, stdlib unittest only
+|-- tests/                  232 tests, stdlib unittest only
 |-- STDLIB.md               every stdlib-for-package substitution (v1, still accurate)
 |-- FORMAT.md               binary object/snapshot format (v1, still accurate)
 |-- ARCHITECTURE.md         v1's original per-layer breakdown

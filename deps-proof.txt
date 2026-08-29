@@ -1,15 +1,17 @@
-Scanning 52 Python file(s)...
+Scanning 54 Python file(s)...
 
 Standard library modules used:
   __future__           ✓ stdlib
   argparse             ✓ stdlib
   ast                  ✓ stdlib
   bisect               ✓ stdlib
+  contextlib           ✓ stdlib
   ctypes               ✓ stdlib
   dataclasses          ✓ stdlib
   datetime             ✓ stdlib
   hashlib              ✓ stdlib
   http                 ✓ stdlib
+  io                   ✓ stdlib
   json                 ✓ stdlib
   multiprocessing      ✓ stdlib
   os                   ✓ stdlib

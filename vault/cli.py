@@ -62,6 +62,10 @@ from vault.experimental.delta_pack import (
 from vault.experimental.lock import LockTimeoutError, RepositoryLock
 from vault.experimental.pack_aware_store import PackAwareObjectStore
 from vault.experimental.path_history import PathHistoryIndex
+from vault.experimental.recover_check import (
+    check_snapshot_recoverable,
+    format_recover_report,
+)
 from vault.experimental.stress_test_cmd import (
     run_concurrency_stress_test,
     run_corruption_recovery_demo,
@@ -309,6 +313,20 @@ def cmd_verify(args: argparse.Namespace) -> int:
         print(f"✓ All {len(all_hashes)} objects verified ({elapsed:.3f}s)")
         print("Repository healthy.")
         return 0
+
+
+def cmd_recover_check(args: argparse.Namespace) -> int:
+    """Read-only recoverability audit for a single snapshot: metadata
+    well-formedness, every referenced object present and intact (loose
+    or packed), delta bases resolvable, hashes well-formed, entry
+    names path-safe. Modifies nothing. Composes existing verify /
+    tree-walk / delta-manifest logic -- see
+    vault/experimental/recover_check.py."""
+    engine, _ = _engine_and_source(args)
+    snap_id = resolve_snapshot_ref(engine, args.snapshot_id)
+    report = check_snapshot_recoverable(engine, snap_id)
+    print(format_recover_report(report))
+    return 0 if report.recoverable else 1
 
 
 def cmd_gc(args: argparse.Namespace) -> int:
@@ -707,6 +725,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify = sub.add_parser("verify", help="Verify integrity of all stored objects")
     p_verify.add_argument("path", nargs="?", default=".")
     p_verify.set_defaults(func=cmd_verify)
+
+    p_recover_check = sub.add_parser(
+        "recover-check",
+        help="Read-only: check whether one snapshot could be fully restored right now",
+    )
+    p_recover_check.add_argument("snapshot_id", help="Snapshot id or tag name")
+    p_recover_check.add_argument("--path", default=".")
+    p_recover_check.set_defaults(func=cmd_recover_check)
 
     p_gc = sub.add_parser("gc", help="Garbage-collect unreachable objects")
     p_gc.add_argument("path", nargs="?", default=".")

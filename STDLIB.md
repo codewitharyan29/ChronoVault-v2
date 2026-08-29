@@ -281,13 +281,13 @@ verified across a 5-snapshot sequence, not just a single run.
 **Claim, scoped precisely:** `dist/chronovault_single.py`, generated
 by `scripts/build_single_file.py` from the real modular source, is a
 single self-contained Python file implementing the complete
-ChronoVault CLI (all 19 commands), with zero third-party dependencies
+ChronoVault CLI (all 20 commands), with zero third-party dependencies
 (verified independently via AST inspection, not just the existing
 dependency checker).
 
 **What this is NOT claiming:** that the real project is (or should
 be) a single file. The modular source under `vault/` remains the
-actual, primary codebase — tested by all 204 tests, documented,
+actual, primary codebase — tested by all 232 tests, documented,
 reviewed across many rounds. `dist/chronovault_single.py` is a
 *generated build artifact*, in the same spirit as SQLite's own
 `sqlite3.c` amalgamation: SQLite's real source is hundreds of files;

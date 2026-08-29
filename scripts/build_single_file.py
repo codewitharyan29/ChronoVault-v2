@@ -60,6 +60,7 @@ FILES_IN_ORDER = [
     "vault/experimental/lock.py",
     "vault/experimental/benchmark_cmd.py",
     "vault/experimental/stress_test_cmd.py",
+    "vault/experimental/recover_check.py",
     "vault/cli.py",
 ]
 
