@@ -1,5 +1,5 @@
 track = "Track D — Data & Storage"
-pitch = "ChronoVault is a zero-dependency, content-addressable snapshot/recovery engine built entirely on Python's standard library, where the storage, dedup, delta-compression, and concurrency mechanics are implemented and provable, not delegated to Git or SQLite."
+pitch = "ChronoVault is a zero-dependency, content-addressable snapshot/recovery engine built entirely on Python's standard library, where the storage, dedup, delta-compression, concurrency and crash-safety mechanics are implemented here and proven against real reproduced failures — not delegated to Git or SQLite."
 
 # Bonus claims, each with a re-runnable proof. Point values per the
 # Zero Dep Hack Track D rubric. Total claimed: +16.
