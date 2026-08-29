@@ -2,8 +2,9 @@
 
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
-![Tests](https://img.shields.io/badge/tests-202%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-218%20passing-brightgreen)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
+[![CI](https://github.com/codewitharyan29/ChronoVault-v2/actions/workflows/test.yml/badge.svg)](https://github.com/codewitharyan29/ChronoVault-v2/actions/workflows/test.yml)
 
 **A Git-like snapshot/recovery engine built from scratch with zero
 dependencies, where storage correctness is the project — not
@@ -33,7 +34,7 @@ Delete everything, get it back exactly. Corrupt one object, and the
 system refuses to silently restore bad data — it tells you and stops.
 
 ```
-✓ 204 tests            ✓ Concurrent-process safe
+✓ 220 tests            ✓ Concurrent-process safe
 ✓ Corruption-safe restore   ✓ Tree-diff-derived delta compression
 ```
 
@@ -93,9 +94,6 @@ failure scenarios, not just unit tests written to pass.
 
 ## 2. Why is it different?
 
-A zero-dependency, content-addressable snapshot engine focused on
-point-in-time recovery, where the storage mechanics are implemented
-and measurable rather than outsourced to SQLite or hidden behind Git.
 Every claim in this README — the hashing, the deduplication, the
 pack format, the delta encoding, the concurrency guarantee — is
 something you can read the source of and re-run the proof for
@@ -349,10 +347,8 @@ Five bugs, found → fixed → locked in:
 | Path traversal on restore | Hand-crafted malicious tree object, run live | Restore-path validation against the repo root | `test_restore.py::test_restore_is_protected_against_path_traversal` |
 | Demo path resolution (`$0` vs absolute) | `make demo-v2`, first real run on a clean checkout | Resolve the script's own absolute path | `make demo-v2` runs the full end-to-end flow and now completes from any working directory (no unittest — the demo script *is* the check) |
 
-This is the part worth reading even if nothing else is: the most
-interesting result in v2 wasn't a benchmark number, it was the
-delta/GC bug, found by actually running the software end-to-end, not
-by reasoning about it in the abstract.
+The most instructive bug in v2 wasn't a benchmark number — it was the
+delta/GC bug, found by running the software end to end.
 
 **What happened:** after wiring delta compression into `vault pack`,
 `vault verify` started reporting a corrupted object on a repository
@@ -423,37 +419,23 @@ edits (the realistic case), so this didn't show up until deliberately
 tested against a harder, less-common editing pattern.
 
 **3. Delta-aware garbage collection — a proven failure-handling
-capability, not a hope.** Bolting delta compression onto an object
-store creates a silent hazard most projects get wrong: a
-delta-encoded object can't be reconstructed without its base, so if
-GC doesn't understand deltas it can delete a base that a live object
-still needs — and nothing fails until someone tries to restore, long
-after the evidence is gone.
-
-ChronoVault treats this as a capability to *demonstrate*, in the
-project's own experiment-first discipline:
-
-- **Disaster reproduced first.** `tests/test_v2_delta_gc.py` proves
-  v1's unmodified GC *would* delete a live delta base — the danger is
-  constructed and shown real, not just asserted.
-- **Fix proven against that exact scenario, live, through the real CLI:**
-  `pack` (base gets packed) → `snapshot-rm` the base's *only* owning
-  snapshot → `gc` (reports "delta-aware: live delta bases protected")
-  → `restore` still produces a **byte-for-byte** match → `verify`
-  passes.
-- **Locked in.** The disaster scenario is a permanent regression
-  test, so a future change that reintroduces the hazard fails CI.
-
-That's a stronger claim than most systems make about this failure
-mode: not "our GC is careful," but "here is the exact way it could
-have corrupted your data, here is the reproduction, and here is the
-proof it no longer can."
+capability, not a hope.** A delta-encoded object can't be
+reconstructed without its base, so a GC that doesn't understand
+deltas can silently delete a base a live object still needs, with no
+failure until a restore is attempted. ChronoVault *reproduces that
+exact disaster first* (`tests/test_v2_delta_gc.py` builds it and
+shows v1's GC *would* delete the base), then proves the fix against
+it live and pins it with a permanent regression test — the full
+`pack → snapshot-rm → gc → restore → verify` walkthrough is under
+**Code-quality discipline** above. The claim isn't "our GC is
+careful"; it's "here is the exact way it could have corrupted your
+data, and here is the proof it no longer can."
 
 ## 5. Evidence / reproducibility
 
 ```bash
 make verify-deps    # confirm zero external dependencies, from source
-make test            # full 204-test suite (202 pass, 2 skipped -- Windows symlink-privilege limitation, not a failure)
+make test            # full 220-test suite (218 pass, 2 skipped -- Windows symlink-privilege limitation, not a failure)
 make demo-v2          # reproduce the v2 demo and benchmark numbers above
 ```
 
@@ -464,7 +446,7 @@ not these ones.
 
 ### Testing
 
-204 tests (202 passing, 2 skipped — a Windows-only symlink-privilege
+220 tests (218 passing, 2 skipped — a Windows-only symlink-privilege
 limitation, not a failure), `python3 -m unittest discover tests -v`
 (`python` instead of `python3` on Windows). Covers everything v1
 covered, plus:
@@ -769,7 +751,7 @@ chronovault/
 |       |-- path_history.py        the `vault log` index
 |       |-- benchmark_cmd.py       powers `vault benchmark`
 |       `-- stress_test_cmd.py     powers `vault stress-test`
-|-- tests/                  204 tests, stdlib unittest only
+|-- tests/                  220 tests, stdlib unittest only
 |-- STDLIB.md               every stdlib-for-package substitution (v1, still accurate)
 |-- FORMAT.md               binary object/snapshot format (v1, still accurate)
 |-- ARCHITECTURE.md         v1's original per-layer breakdown
