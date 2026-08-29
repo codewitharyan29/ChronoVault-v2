@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Newer runs for the same branch/PR supersede older ones still in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # ChronoVault's own scripts print box-drawing / check-mark characters.
+  # Force UTF-8 for stdout/stderr so a runner whose locale would otherwise
+  # be ASCII (some Linux images) can't crash the run on a print().
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  test:
+    name: py${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is not optional here: this project has a documented
+        # history of bugs that only reproduce on real Windows filesystems
+        # (see the bug-finding story in README.md), so every Python
+        # version is exercised on both platforms.
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Report Python version
+        run: python --version
+
+      # ChronoVault is a zero-dependency project: there is deliberately
+      # no `pip install` step. check_dependencies.py is the proof --
+      # it AST-scans every .py file and fails if any import is not stdlib.
+      - name: Zero-dependency proof
+        run: python scripts/check_dependencies.py
+
+      - name: Run the full test suite
+        run: python -m unittest discover tests -v
+
+      - name: Judge-mode aggregator
+        run: python scripts/judge_mode.py

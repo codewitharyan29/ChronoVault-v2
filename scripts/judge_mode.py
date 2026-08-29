@@ -45,7 +45,12 @@ def run(cmd: list, cwd=None) -> tuple:
     # errors="replace" keeps a decode hiccup from turning into a hang
     # or crash here; a real content problem still shows up as garbled
     # text in the report rather than silently succeeding.
-    deadline = time.time() + 130  # a little past subprocess's own 120s timeout
+    # The per-step cap has to clear the slowest legitimate step (the full
+    # unittest run) on the slowest realistic machine -- a 2-core CI
+    # Windows runner, not just a fast dev laptop -- while still cutting off
+    # a genuine infinite hang. 900s does both; the CI job's own
+    # timeout-minutes is the outer backstop.
+    deadline = time.time() + 930  # a little past subprocess's own 900s timeout
     while True:
         remaining = deadline - time.time()
         if remaining <= 0:
@@ -53,7 +58,7 @@ def run(cmd: list, cwd=None) -> tuple:
         try:
             result = subprocess.run(
                 cmd, cwd=cwd or ROOT, capture_output=True, text=True,
-                timeout=120, encoding="utf-8", errors="replace"
+                timeout=900, encoding="utf-8", errors="replace"
             )
             return result.returncode, result.stdout, result.stderr
         except KeyboardInterrupt:
