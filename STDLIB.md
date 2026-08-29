@@ -124,6 +124,17 @@ handful more) that haven't been triaged case-by-case. Reported here
 rather than left as a stale "clean" claim a judge could disprove in
 under a minute by running the exact commands this section names.
 
+## Crash-safety testing (`tests/test_v2_snapshot_crash_safety.py`)
+
+Test infrastructure, not shipped code — so **not** counted in the
+14 above — but a real stdlib-for-package call worth recording, since
+"prove a process crash mid-write leaves the repo consistent" is
+exactly the kind of thing people reach for a framework to do.
+
+| Instead of... | We use... | Why |
+|---|---|---|
+| A fault-injection / chaos-testing framework, or an in-process mock harness that patches `os.replace` and asserts on call order | A one-file worker run as a real child via `subprocess`, which monkeypatches one seam **in that child only** and calls `os._exit(137)` at the chosen line | `os._exit()` is the only way from Python to get a process death that runs **no `finally`, no `atexit`, no buffer flush** — i.e. a faithful `SIGKILL` analogue. An in-process mock can't simulate that (its `finally` blocks still run); a chaos framework is huge machinery for a four-point test. The child-process approach also keeps `vault/snapshot.py` completely untouched — the injection lives entirely in the test. |
+
 ## Package Killer
 
 **Bonus claim (+3).** ChronoVault's `vault/objects.py` replaces a
@@ -168,21 +179,22 @@ Measured on 2026-08-29, Python 3.14.0, Windows 11, `diskcache` 5.6.3.
 
 **The storage numbers below are deterministic** — the workload is
 seeded and `zlib` is deterministic, so they reproduce byte-for-byte
-run to run and machine to machine (verified across repeated runs).
-**The timing numbers are not** — on Windows, per-file open cost
-(real-time AV scanning, syscall latency) swings them substantially;
-across repeated runs on this machine ChronoVault measured **~9–13x
-slower on write** and **~120–250x slower on read** (one run reached
-~470x). Ranges, not a single figure, because a single figure here
-would be false precision. Run the script for your own.
+run to run and machine to machine (identical across ~half a dozen
+runs while writing this section). **The timing numbers are not** —
+on Windows, per-file open cost (real-time AV scanning, syscall
+latency) swings them wildly. Across those runs ChronoVault measured
+**~9–13x slower on write** and **~120–470x slower on read** — the
+read multiple genuinely varies by ~4x between back-to-back runs on
+this machine, so treat it as an order of magnitude, not a figure.
+Run the script for your own.
 
 **Scenario 1 — 1500 all-unique blobs (~5.5 MB raw), both keyed by
 SHA-256 of the content, 500 random reads timed:**
 
 | Metric | ChronoVault | diskcache | |
 |---|---|---|---|
-| write, per object   | ~5–7 ms | ~0.4–0.8 ms | ChronoVault ~9–13x slower (volatile) |
-| read, per object    | ~6–10 ms | ~0.05 ms | ChronoVault ~120–250x slower (volatile) |
+| write, per object   | ~5–10 ms | ~0.4–0.8 ms | ChronoVault ~9–13x slower (volatile) |
+| read, per object    | ~4–23 ms | ~0.03–0.05 ms | ChronoVault ~120–470x slower (**extremely** volatile) |
 | on-disk total       | **1.4 MB** | **6.9 MB** | **ChronoVault 0.20x — ~5x smaller (exact, reproducible)** |
 
 **Scenario 2 — 2000 logical blobs, only 10% unique (the
@@ -206,11 +218,11 @@ smaller** on this workload.
   keeps everything in one SQLite file with no per-read verification.
   The read multiple in particular is sensitive to the host's
   small-file-open cost (AV scanning, syscall latency) — the script
-  prints that raw floor separately (typically <0.5 ms of a ~6–10 ms
-  ChronoVault read on this machine) so a reader can see how much is
-  ChronoVault's own logic. At this project's scale (snapshotting a
-  source tree, not serving a hot cache) the absolute numbers are
-  low single-digit-to-tens of milliseconds per object. This is the
+  prints that raw floor separately (~0.3 ms of a 4–23 ms ChronoVault
+  read on this machine) so a reader can see how much is ChronoVault's
+  own logic. At this project's scale (snapshotting a source tree, not
+  serving a hot cache) the absolute numbers are low
+  single-digit-to-tens of milliseconds per object. This is the
   deliberate trade: no database dependency, plain inspectable files,
   tamper-evidence on every read — paid for in throughput.
 - **The Scenario 1 size gap is mostly one config choice**, not a
@@ -219,9 +231,10 @@ smaller** on this workload.
   Fair as a picture of what each tool does out of the box, no more.
 - **Scenario 2 is the real architectural point.** Whole-file dedup is
   a property of addressing content by its hash. ChronoVault builds
-  that into ~200 lines of stdlib; `diskcache` matches it only if you
-  write the content-addressing layer yourself — at which point the
-  dependency is carrying less weight than the code around it.
+  that into ~250 lines of stdlib (all of `vault/objects.py`);
+  `diskcache` matches it only if you write the content-addressing
+  layer yourself — at which point the dependency is carrying less
+  weight than the code around it.
 
 ### Isolation note (why this doesn't dent "zero dependencies")
 
