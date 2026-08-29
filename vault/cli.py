@@ -517,14 +517,15 @@ def cmd_log(args: argparse.Namespace) -> int:
     engine, _ = _engine_and_source(args)
     index = PathHistoryIndex(engine.vault_dir)
 
-    if not index.history_for(args.path_arg):
-        # Cache miss -- rebuild from the actual snapshots. This is what
-        # keeps the index reconstructible rather than load-bearing.
+    if not index.history_for(args.path_arg) or not index.renames_path.exists():
+        # Cache miss, OR the rename sidecar has not been built for this
+        # repo yet (e.g. an index created before rename awareness).
+        # Either way, rebuild from the actual snapshots -- the index
+        # and its rename links stay reconstructible, never load-bearing.
         index.rebuild_from_scratch(engine)
-        index.persist() if hasattr(index, "persist") else None
 
-    history = index.history_for(args.path_arg)
-    if not history:
+    lineage = index.lineage_for(args.path_arg)
+    if not lineage:
         print(f"No history found for '{args.path_arg}'.")
         print("(The path may not exist in any snapshot.)")
         return 1
@@ -532,16 +533,23 @@ def cmd_log(args: argparse.Namespace) -> int:
     print(f"History for {args.path_arg}")
     print()
     snapshots_by_id = {s.id: s for s in engine.list_snapshots()}
-    for snap_id, blob_hash in history:
+    for snap_id, blob_hash, path_at in lineage:
         record = snapshots_by_id.get(snap_id)
         when = ""
         label = ""
         if record:
             when = datetime.datetime.fromtimestamp(record.timestamp).strftime("%Y-%m-%d %H:%M")
             label = f'"{record.message}"' if record.message else ""
-        print(f"  Snapshot {snap_id:<4} {blob_hash[:12]}...  {when}  {label}")
+        as_of = "" if path_at == args.path_arg else f"  (as {path_at})"
+        print(f"  Snapshot {snap_id:<4} {blob_hash[:12]}...  {when}  {label}{as_of}")
     print()
-    print(f"{len(history)} change(s) recorded.")
+    other_names = sorted({p for _, _, p in lineage if p != args.path_arg})
+    if other_names:
+        entry_word = "entry" if len(lineage) == 1 else "entries"
+        print(f"{len(lineage)} {entry_word} across a rename "
+              f"(this file has also been known as: {', '.join(other_names)}).")
+    else:
+        print(f"{len(lineage)} change(s) recorded.")
     return 0
 
 

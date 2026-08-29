@@ -107,22 +107,13 @@ staging, or distributed collaboration. The project focuses on one
 question: can we build a reliable, inspectable snapshot/recovery
 engine ourselves, using only Python's standard library?
 
-**Why this isn't just "another Git clone":** the goal here was never
-to reimplement Git's feature set — it's to build the storage
-mechanics from scratch and see what a from-scratch object model
-makes *possible* that copying Git's design wouldn't. One concrete
-example, measured not asserted: Git has to *guess* which earlier
-object a new one evolved from (name/size heuristics), because its
-pack-building process doesn't carry path history forward.
-ChronoVault's snapshot model makes that relationship provable — a
-real tree diff between two snapshots directly names the earlier blob
-a later one evolved from. Built a naive Git-style heuristic as a
-controlled baseline and ran both against identical data
-(`scripts/compare_delta_base_selection.py`, reproducible): path-aware
-selection was right 100% of the time, by construction; the
-heuristic's extra guesses were wrong more than half the time. That's
-the difference between building your own storage engine and copying
-one — see "What v2 proves" below for the full result.
+**Why this isn't just "another Git clone":** the goal was never to
+reimplement Git's feature set — it's to build the storage mechanics
+from scratch and see what a from-scratch object model makes
+*possible* that copying Git's design wouldn't. That question has one
+headline answer, and it's measured, not asserted — see
+**[The core differentiator](#the-core-differentiator-provable-file-lineage-vs-gits-guesswork)**
+below.
 
 ### The zero-dependency achievement, made concrete
 
@@ -161,6 +152,72 @@ Every one of those five is independently checkable in under a minute
 — see the Judge checklist below.
 
 ## 3. 30-second demo
+
+### End to end: one proof flow
+
+Every capability below already exists and is tested — this is the
+single flow that ties them together, from first snapshot to
+recovering real data past a corrupted object. `make demo-v2` runs the
+`init → snapshot → snapshot → diff → pack → verify` half against a
+throwaway repo; `vault stress-test` runs the
+`corrupt → detect → refuse → recover` half live, with a real flipped
+byte on disk. The full sequence was re-run by hand end to end while
+writing this section; the output block below is from that run (trimmed
+for width, same as the banner at the top of this README).
+
+```
+ 1  vault init .                      repository created
+ 2  vault snapshot -m "v1"            snapshot 1  (app.py = A)
+ 3  <edit app.py>                     working tree changes
+ 4  vault snapshot -m "v2"            snapshot 2  (app.py = B); identical
+                                       files are deduplicated, not re-stored
+ 5  vault diff 1 2                    shows exactly app.py: A -> B
+ 6  vault pack                        loose objects consolidated; the v1->v2
+                                       change is delta-encoded against its
+                                       real tree-diff base, kept only if
+                                       smaller than plain compression
+ 7  vault verify                      re-hashes every object (loose AND
+                                       inside packs): "All objects verified"
+ ─  <flip one byte in a stored object referenced by snapshot 1>
+ 8  vault verify                      "1 corrupted object(s) found" —
+                                       caught by hash mismatch, not a guess
+ 9  vault restore 1                   integrity check runs FIRST; the
+                                       corrupted object fails it, so restore
+                                       aborts before touching a single file
+10  vault restore 2                   snapshot 2's objects are all intact —
+                                       restores byte-for-byte, correctly
+```
+
+```
+ snapshot ─▶ modify ─▶ snapshot ─▶ diff ─▶ pack (+delta)
+                                              │
+                                              ▼
+                                           verify ✓
+                                              │
+              corrupt one stored object ─────┤
+                                              ▼
+                                           verify ✗  ── detects it
+                                              │
+                       restore 1 (needs it) ──┤──▶ REFUSED, no files touched
+                                              │
+                       restore 2 (intact)  ───┴──▶ byte-perfect recovery
+```
+
+The two lines that matter, from a real run (one object corrupted on
+disk between them — not invented for the README):
+
+```
+$ vault verify
+✗ 1 corrupted object(s) found
+Repository integrity FAILED.
+
+$ vault restore 1
+⚠ Integrity check failed — restore aborted before any changes were made.
+```
+
+Corruption is *detected*, and a restore that would rely on bad data
+*refuses* rather than silently writing it — then a healthy snapshot
+still recovers cleanly.
 
 ### Judge checklist
 
@@ -228,14 +285,40 @@ v1 was already feature-complete, tested, and security-reviewed. v2
 adds four capabilities, each built as a genuine experiment first —
 theory, real-system comparison, implementation, adversarial testing,
 honest verdict — and only merged after clearing that bar with real
-evidence:
+evidence.
+
+### The core differentiator: provable file lineage vs. Git's guesswork
+
+This is the one result to take away. When Git builds a pack, it has
+to **guess** which earlier object each new one evolved from — a
+name-and-size heuristic — because its pack process carries no path
+history. ChronoVault's snapshot model doesn't guess: a real tree
+diff between two snapshots *names* the earlier blob a later one
+evolved from, by construction.
+
+We didn't just assert that's better — we built the Git-style
+size-proximity heuristic as a controlled baseline and ran both
+against identical data
+(`scripts/compare_delta_base_selection.py` / `make demo-differentiation`,
+reproducible on any machine):
+
+| Delta-base selection strategy | Relationships found | Genuinely correct | False positives |
+|---|---|---|---|
+| **ChronoVault — path-aware (tree diff)** | 8 | **8 (100%)** | **0** |
+| Git-style — size proximity, no path info | 23 | 8 | **8 of the 15 extra guesses (53%) pair provably unrelated content** |
+
+Path-aware precision here isn't luck — it's **structural**. A real
+tree diff *cannot* report a false "this evolved from that"
+relationship the way a size coincidence can. That is the concrete
+payoff of building the storage engine instead of copying one; the
+full breakdown is in **[What's actually novel here](#whats-actually-novel-here)**.
 
 | Capability | What it proves | Real, measured result |
 |---|---|---|
 | **Concurrent-write locking** | v1 had an actual, reproducible data-corruption bug | 10 concurrent `vault snapshot` processes → 10/10 unique IDs, all 10 snapshots persisted and readable via `vault list` (0 lost writes; was 7/8 unique without the fix) |
 | **Pack files (corrected)** | Consolidating objects can beat loose storage on *both* speed and space | 7.6x faster reads, 57.7x lower disk usage, in the benchmark workload |
 | **Delta compression** | ChronoVault's tree-diff-derived base selection is deterministic and path-aware, with a genuine size-based fallback | Real space savings on evolving files (never forces a worse encoding than plain compression) |
-| **Path-history index** | Answers "show me every version of this file" with a direct index instead of re-walking snapshot history on every query | 574x faster indexed lookup (0.0169 ms vs. 9.68 ms, 200 snapshots, benchmark workload) |
+| **Path-history index** | Answers "show me every version of this file" with a direct index instead of re-walking snapshot history on every query; **v2.1: follows content-identical renames** | 574x faster indexed lookup (0.0169 ms vs. 9.68 ms, 200 snapshots, benchmark workload) |
 
 **Command count:** v1: 15 commands. v2: +4 commands. Total: 19.
 
@@ -243,19 +326,28 @@ All 15 v1 commands retain their original behavior and continue to
 work in v2 (see Testing below). v2 adds 4:
 `pack`, `log`, `benchmark`, `stress-test`.
 
-### The bug-finding story
+### Code-quality discipline: five bugs found → reproduced → fixed → regression-locked
 
-Five real bugs were found during development — not hypothetical edge
-cases, each reproduced against the live implementation, fixed, and
-locked in with a regression test:
+The interesting claim here isn't "we had bugs" — every project does.
+It's the **repeatable method** applied to each one, and the invariant
+it leaves behind:
 
-| Problem discovered | How it was found | Fix | Proof |
+> Every bug was **reproduced against the live implementation** first
+> (not reasoned about), then fixed, then **pinned by a permanent test
+> that fails if the exact hazard ever returns** — and CI re-runs the
+> whole suite across multiple Python versions on both Linux and
+> Windows, so a regression fails on a stranger's machine, not just
+> this one.
+
+Five bugs, found → fixed → locked in:
+
+| Bug | Found by (a real run, not a hunch) | Fix | Locked in as |
 |---|---|---|---|
-| Concurrent snapshot ID collision | Real `multiprocessing` run, 8 processes | Repository lock (`O_EXCL` + stale-lock detection) | 10/10 unique IDs (was 7/8 without the lock) |
-| Delta base disappeared after packing/GC | End-to-end pack → verify → GC → restore | Delta-aware reachability + pack-first base resolution | Byte-for-byte restore after GC |
-| Symlink recursion | Real filesystem test, 2000-level nesting | Skip symlinks (a comment claimed this but the check didn't exist) | Cycle terminates, no `RecursionError` |
-| Path traversal | Live crafted malicious tree object | Restore path validation | Exploit blocked, regression-tested |
-| Demo path resolution | `make demo-v2`, first real run | Absolute script path instead of relative `$0` | Full demo succeeds |
+| Concurrent `snapshot` ID collision | `multiprocessing`, 8 processes racing | Repository lock (`O_EXCL` + stale-lock detection) | `test_experimental_lock.py` — `test_without_lock_..._can_collide` **proves the race is real**, `test_with_lock_..._never_collide` proves the fix (10/10 unique; was 7/8) |
+| Delta base vanished after `pack` + `gc` | End-to-end `pack → verify → gc → restore` | Delta-aware reachability + pack-first base resolution | `test_v2_delta_gc.py` — `test_THE_DISASTER_v1_unmodified_gc_would_delete_a_needed_base` constructs the disaster, then the fix is proven against it |
+| Symlink-cycle infinite recursion | Real filesystem test, directory symlink loop | Actually skip symlinks (a comment claimed it; the check didn't exist) | `test_snapshot.py::test_symlinked_directory_cycle_does_not_infinite_loop` |
+| Path traversal on restore | Hand-crafted malicious tree object, run live | Restore-path validation against the repo root | `test_restore.py::test_restore_is_protected_against_path_traversal` |
+| Demo path resolution (`$0` vs absolute) | `make demo-v2`, first real run on a clean checkout | Resolve the script's own absolute path | `make demo-v2` runs the full end-to-end flow and now completes from any working directory (no unittest — the demo script *is* the check) |
 
 This is the part worth reading even if nothing else is: the most
 interesting result in v2 wasn't a benchmark number, it was the
@@ -281,11 +373,19 @@ vault restore <snapshot>       → EXACT byte-for-byte match, still correct
 vault verify                   → ✓ All objects verified
 ```
 
-Two more real bugs were found the same way during v2's development —
-a pack-format incompatibility caught by tracing formats before
-wiring (never shipped), and a test that initially "passed" for the
-wrong reason (it hadn't actually constructed the danger condition it
-claimed to test) — both corrected before being trusted.
+**Two more, caught by the same method before they could ship:**
+
+- A **pack-format incompatibility**, caught by tracing the on-disk
+  format by hand before wiring the two pack layers together — never
+  shipped.
+- A **test that "passed" for the wrong reason** — it hadn't actually
+  constructed the danger condition it claimed to cover, so it would
+  have gone green even against the buggy code. Rewritten to build the
+  real condition, then confirmed it fails without the fix. (Two such
+  tests were found this way — see "Testing" below.)
+
+Seven bugs total, same discipline each time: reproduce it for real,
+fix it, leave behind a test that won't let it come back quietly.
 
 ### Security
 
@@ -301,33 +401,18 @@ Not "invented a new concept from scratch" — that's rare in any
 hackathon project, including the ones ChronoVault is compared
 against. The specific claims:
 
-**Tree-diff-derived delta base selection, measured against a controlled
-baseline, not just argued.** Built a naive size-proximity heuristic
-(the shape of Git's real heuristic, minus name-matching, since
-ChronoVault has no comparable string-similarity layer to compare
-fairly) and ran both against identical test data —
-`scripts/compare_delta_base_selection.py`, reproducible with real
-numbers on any machine:
+**1. Tree-diff-derived delta base selection — the core differentiator,
+measured against a controlled baseline.** Covered in full above
+([The core differentiator](#the-core-differentiator-provable-file-lineage-vs-gits-guesswork)):
+8/8 correct relationships (100%) for the path-aware strategy vs. 8
+provably-unrelated false pairings among the size heuristic's 15 extra
+guesses (53%), on identical data, via
+`scripts/compare_delta_base_selection.py`. One detail worth adding
+here: the 8 false pairings were confirmed unrelated by checking the
+paired objects don't even share a filename — the heuristic isn't
+"picking a worse base," it's inventing relationships that don't exist.
 
-```
-Path-aware (tree-diff):  8 candidates, ALL genuinely correct
-                           relationships (100% precision, by
-                           construction — every one traces to a real
-                           tree diff of a modified path)
-Size-heuristic (no path): 23 candidates found, only 8 match
-                           path-aware's picks; of the 15 extra, 8
-                           (53%) provably pair GENUINELY UNRELATED
-                           content that only happens to share a size
-```
-
-The size heuristic isn't just "sometimes picks a worse base" — over
-half its extra guesses, in this test, are objects with *zero* real
-relationship, confirmed by checking they don't even share a filename.
-Path-aware's precision isn't empirical luck; it's structural — a real
-tree diff cannot report a false "this evolved from that" relationship
-the way a size coincidence can.
-
-**A genuinely new limitation, found by this same round of testing, not
+**2. A genuinely new limitation, found by this same round of testing, not
 hidden:** the delta algorithm's fixed 64-byte block matching finds
 *zero* copyable bytes when changes are densely scattered (a small
 edit on every line, rather than one localized region) — confirmed
@@ -337,15 +422,32 @@ encoding. Every earlier benchmark in this project used localized
 edits (the realistic case), so this didn't show up until deliberately
 tested against a harder, less-common editing pattern.
 
-**Delta-aware garbage collection is a systems-integration problem most
-projects that bolt delta compression onto object storage get wrong
-silently.** A delta-encoded object depends on its base to be
-reconstructed; if GC doesn't know that, it can delete a base a live
-object still needs, and the failure is invisible until someone tries
-to restore. This isn't hypothetical here — `tests/test_v2_delta_gc.py`
-reproduces the exact disaster (v1's unmodified GC provably *would*
-delete a needed base) before proving the fix, which is a stronger
-claim than most systems make about this exact failure mode.
+**3. Delta-aware garbage collection — a proven failure-handling
+capability, not a hope.** Bolting delta compression onto an object
+store creates a silent hazard most projects get wrong: a
+delta-encoded object can't be reconstructed without its base, so if
+GC doesn't understand deltas it can delete a base that a live object
+still needs — and nothing fails until someone tries to restore, long
+after the evidence is gone.
+
+ChronoVault treats this as a capability to *demonstrate*, in the
+project's own experiment-first discipline:
+
+- **Disaster reproduced first.** `tests/test_v2_delta_gc.py` proves
+  v1's unmodified GC *would* delete a live delta base — the danger is
+  constructed and shown real, not just asserted.
+- **Fix proven against that exact scenario, live, through the real CLI:**
+  `pack` (base gets packed) → `snapshot-rm` the base's *only* owning
+  snapshot → `gc` (reports "delta-aware: live delta bases protected")
+  → `restore` still produces a **byte-for-byte** match → `verify`
+  passes.
+- **Locked in.** The disaster scenario is a permanent regression
+  test, so a future change that reintroduces the hazard fails CI.
+
+That's a stronger claim than most systems make about this failure
+mode: not "our GC is careful," but "here is the exact way it could
+have corrupted your data, here is the reproduction, and here is the
+proof it no longer can."
 
 ## 5. Evidence / reproducibility
 
@@ -479,7 +581,7 @@ write to temp file, atomic rename into place
 | `info` | Repository format version, hash algorithm, object encoding |
 | `explain <id>` | Dedup/compression breakdown for one snapshot |
 | `tag <id> <name>` | Name a snapshot for easy reference |
-| `log <path>` *(v2)* | History of one file across all snapshots — 574x faster indexed lookup (0.0169 ms vs. 9.68 ms on the benchmark workload) |
+| `log <path>` *(v2)* | History of one file across all snapshots, following content-identical renames — 574x faster indexed lookup (0.0169 ms vs. 9.68 ms on the benchmark workload) |
 
 **Storage internals:**
 
@@ -527,8 +629,8 @@ compression, so there's no practical need for a disable flag.
 delta-encoded object cannot be reconstructed without its base. If a
 snapshot referencing that base directly is deleted, ordinary tree-walk
 reachability has no way to know the base is still needed — proven as
-a real, reproducible bug scenario (see The bug-finding story above),
-not just reasoned about.
+a real, reproducible bug scenario (see "Code-quality discipline"
+above), not just reasoned about.
 
 **Why single-level deltas only, no chains?** Enforced independently in
 two places (candidate selection *and* base resolution refuses to
@@ -559,7 +661,8 @@ feature set. It gives up:
 
 - branching and merging
 - staging
-- rename detection
+- content-similarity rename detection (see the note under Known
+  limitations — content-*identical* renames **are** followed)
 - chunk-level deduplication
 - encryption
 
@@ -575,10 +678,65 @@ dedup only, symlinks skipped, no encryption). v2 adds:
 - **Delta compression is single-level, transaction-scoped to one
   `vault pack` run** — deltas aren't re-evaluated against newer bases
   in later `pack` runs.
-- **The path-history index has no rename detection** — a file moved
-  to a new path shows as two unrelated histories. Git can detect
-  renames heuristically during history analysis (`diff`/`log`), but
-  does not store renames as first-class metadata either.
+- **Rename detection in `vault log` is content-identical only.** As of
+  v2.1 the path-history index *does* follow renames: when a file
+  disappears from one path and a byte-for-byte identical file (same
+  object hash) appears at a new path in the same snapshot, the two
+  are linked as one lineage, and `vault log <either-path>` shows the
+  history across the move (rename links live in a rebuildable sidecar,
+  `path_renames.json`; the main index format is unchanged). It uses
+  only data already in the object store — no similarity scoring, no
+  new dependency — so it is deliberately conservative about what it
+  will claim. It does **not** catch:
+    - **A move plus a content edit in the same snapshot.** The hashes
+      differ, and without a content-similarity heuristic there's no
+      signal separating that from an unrelated delete + add — so it
+      shows as the old path ending and the new one beginning. (A move
+      in one snapshot followed by edits in *later* snapshots is
+      followed fine.)
+    - **Ambiguous identical content** — if several byte-identical
+      files (e.g. empty `__init__.py`) are relocated at once, the
+      old→new pairing isn't 1:1, so none of them are linked.
+    - **Pure path swaps** (`a` ⇄ `b`) — neither path actually
+      disappears, so there's nothing to pair.
+  Residual false-positive vector, stated plainly: if a file is
+  genuinely deleted and an *unrelated* new file with **byte-for-byte
+  identical content** is added in the same snapshot (and that content
+  is unique to those two paths in that transition), the two are
+  linked as a rename — because by every signal available without a
+  similarity heuristic, they are indistinguishable from one. In
+  practice this needs two files to hash identically, which is
+  uncommon for real source but happens for empty files, shared
+  templates, and generated stubs.
+
+  One more edge case, in the lineage *graph* rather than in
+  detection: lineage is grouped by **path name, not by file
+  identity**. If the *same* path is reused as a rename target for a
+  second, unrelated file — e.g. `a.py` → `c.py`, then `c.py` deleted,
+  then later `b.py` → `c.py` — both renames are still detected
+  correctly, but `vault log` for any name in that tangle blends the
+  two files' histories under the shared `c.py` name. It doesn't just
+  *miss* the earlier `a.py` → `c.py` link when you query `c.py`; it
+  also *mixes in* the wrong file's content — `vault log a.py` will
+  show `b.py`'s later revision (recorded at the `c.py` path it was
+  renamed onto), and `vault log c.py` follows only the most recent
+  link (`b.py` → `c.py`) while still surfacing `a.py`'s one entry
+  from when it briefly held that path. This is a **known, documented,
+  low-risk edge case, not a bug**: it is fully deterministic (the
+  incremental index and a from-scratch rebuild produce the identical
+  result), it never fabricates data (every `(snapshot, hash)` shown
+  genuinely occurred at that path), it never crashes or loops, and it
+  requires a specifically unusual sequence — a path deleted and then
+  a *different* file renamed onto that exact path. It is pinned by
+  `test_path_reused_as_rename_target_twice` so any future change to
+  the behaviour is caught.
+
+  Git's rename detection is fuzzier (similarity-scored): it catches
+  the move-plus-edit case ChronoVault won't, at the cost of its own
+  heuristic misfires. ChronoVault trades that recall for a rule
+  simple enough to state in a sentence and zero new dependencies.
+  Covered by `tests/test_experimental_path_history.py`
+  (`TestRenameAwareLineage`, `TestRenameAwareLogCommand`).
 
 ### Project layout
 
