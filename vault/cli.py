@@ -456,6 +456,13 @@ def cmd_stress_test(args: argparse.Namespace) -> int:
     print(f"  Snapshots created:    {r['snapshots_created']}")
     print(f"  Unique IDs:           {r['unique_ids']}")
     print(f"  Duplicate IDs:        {r['duplicate_ids']}")
+    # Print the actual stderr of any process that exited non-zero -- a
+    # dropped snapshot used to show up only as a lower count with no
+    # cause (this is how the py3.12 windows-latest lock race was found).
+    for f in r.get("failures", []):
+        print(f"  ! process {f['process']} exited {f['exit_code']}:")
+        for line in f["stderr"].splitlines():
+            print(f"      {line}")
     result_1 = "PASS" if r["passed"] else "FAIL"
     print(f"  Result: {result_1}")
     print()

@@ -40,6 +40,8 @@ from vault.objects import (
     ObjectStore,
     ObjectStoreLike,
     VaultError,
+    atomic_replace,
+    windows_retry,
 )
 
 IGNORED_DIR_NAMES = {".vault", ".git", "__pycache__", ".venv", "node_modules"}
@@ -327,15 +329,21 @@ class SnapshotEngine:
         file that only ever increments avoids that entirely — ids are
         unique for the life of the repository, deleted or not.
         """
+        # Every step here touches a file under .vault/ that a concurrent
+        # `vault snapshot` (and a Windows virus scanner) may have a
+        # handle on: on the py3.12 windows-latest CI cell the read, the
+        # temp write, and the rename each raised WinError 5/13/32 and
+        # killed the process mid-snapshot. windows_retry rides out that
+        # transient window; on POSIX it's a straight-through call.
         counter_path = self.vault_dir / "next_id"
         if counter_path.exists():
-            next_id = int(counter_path.read_text().strip())
+            next_id = int(windows_retry(counter_path.read_text).strip())
         else:
             next_id = 1
 
         tmp_path = self.vault_dir / ".next_id-tmp"
-        tmp_path.write_text(str(next_id + 1))
-        os.replace(tmp_path, counter_path)
+        windows_retry(lambda: tmp_path.write_text(str(next_id + 1)))
+        atomic_replace(tmp_path, counter_path)
         return next_id
 
     def _latest_snapshot_id(self) -> int | None:
@@ -396,8 +404,10 @@ class SnapshotEngine:
         # so a crash mid-snapshot never leaves a half-written record.
         snap_path = self.snapshots_dir / str(snap_id)
         tmp_path = self.snapshots_dir / f".tmp-{snap_id}"
-        tmp_path.write_bytes(record.to_json_bytes())
-        os.replace(tmp_path, snap_path)
+        # write + rename retried: a Windows AV/indexer handle on this
+        # directory's files raised WinError 5/13/32 here on py3.12 CI.
+        windows_retry(lambda: tmp_path.write_bytes(record.to_json_bytes()))
+        atomic_replace(tmp_path, snap_path)
 
         return record
 

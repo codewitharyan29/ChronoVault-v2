@@ -38,14 +38,29 @@ def run_concurrency_stress_test(n_processes: int = 10) -> dict:
         procs = []
         for i in range(n_processes):
             (scratch / f"marker_{i}.txt").write_text(f"content {i}")
+            # Capture each child's stderr instead of DEVNULL: a process
+            # that fails to snapshot (lock contention, a Windows
+            # delete-pending race, a timeout) previously vanished
+            # silently and surfaced only as "snapshots_created <
+            # processes_launched" with no traceback to explain it.
             proc = subprocess.Popen(
                 [sys.executable, str(CHRONOVAULT_PY), "snapshot", "-m", f"concurrent {i}", str(scratch)],
-                cwd=str(scratch), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                cwd=str(scratch), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace",
             )
-            procs.append(proc)
+            procs.append((i, proc))
 
-        for proc in procs:
-            proc.wait(timeout=60)
+        failures = []
+        for i, proc in procs:
+            try:
+                _out, err = proc.communicate(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                _out, err = proc.communicate()
+                err = (err or "") + "\n[killed: did not exit within 60s]"
+            if proc.returncode != 0:
+                tail = "\n".join((err or "").strip().splitlines()[-10:])
+                failures.append({"process": i, "exit_code": proc.returncode, "stderr": tail})
 
         list_result = subprocess.run(
             [sys.executable, str(CHRONOVAULT_PY), "list", str(scratch)],
@@ -59,6 +74,7 @@ def run_concurrency_stress_test(n_processes: int = 10) -> dict:
             "snapshots_created": len(snapshot_ids),
             "unique_ids": len(set(snapshot_ids)),
             "duplicate_ids": len(snapshot_ids) - len(set(snapshot_ids)),
+            "failures": failures,
             "passed": len(set(snapshot_ids)) == len(snapshot_ids) and len(snapshot_ids) == n_processes,
         }
     finally:

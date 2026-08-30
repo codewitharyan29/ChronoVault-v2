@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+import time
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,6 +94,61 @@ class ObjectCorruptedError(ObjectError):
             f"Object {obj_hash[:12]}... is corrupted ({reason}).\n"
             f"Run 'vault verify' for a full integrity report."
         )
+
+
+def windows_retry(op, retries: int = 50, delay: float = 0.05):
+    """
+    Run `op` (a zero-arg callable doing ONE filesystem step) and return
+    its result, retrying briefly if Windows raises PermissionError
+    because another process holds a transient handle on the file.
+
+    POSIX filesystem calls (open, rename, unlink) succeed regardless of
+    who else has a file open; Windows does not -- and on the GitHub
+    `windows-latest` runner, Defender's real-time scan opens every file
+    the moment we close it, so a concurrent process that then tries to
+    read / truncate / rename the same path under .vault/ gets WinError
+    5/13/32 ("access denied" / "in use"). This is the flaky "8 launched
+    -> 7 snapshots" failure on the py3.12 windows-latest CI cell: a
+    `vault snapshot` process dies on one of these and never records its
+    snapshot. The window clears within tens of ms once the scanner's
+    handle closes, so retry; re-raise only if it stays stuck (a real
+    error). Same pattern already used for unlink() in
+    vault/experimental/lock.py._safe_unlink. On POSIX the loop runs once.
+    """
+    for attempt in range(retries):
+        try:
+            return op()
+        except PermissionError:
+            if os.name != "nt" or attempt == retries - 1:
+                raise
+            time.sleep(delay)
+
+
+def atomic_replace(src, dst, retries: int = 50, delay: float = 0.05) -> None:
+    """
+    os.replace() (atomic on POSIX & Windows) with a Windows retry loop
+    so a transient AV/indexer handle on `src` or `dst` doesn't kill the
+    process -- see windows_retry for the why. Not built on windows_retry
+    directly because os.replace has one extra Windows wrinkle: a
+    MoveFileEx that hits an open handle on the target can COMPLETE the
+    rename yet still report ERROR_ACCESS_DENIED, so the very next retry
+    finds `src` already gone and raises FileNotFoundError. When that
+    happens after we've already retried and `dst` is now in place, the
+    earlier attempt actually won -- treat it as success. On POSIX the
+    loop runs exactly once.
+    """
+    for attempt in range(retries):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if os.name != "nt" or attempt == retries - 1:
+                raise
+            time.sleep(delay)
+        except FileNotFoundError:
+            if os.name == "nt" and attempt > 0 and not os.path.exists(src) and os.path.exists(dst):
+                return
+            raise
 
 
 def hash_bytes(data: bytes) -> str:
@@ -243,7 +299,7 @@ class ObjectStore:
                 f.write(stored_bytes)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp_path, dest)  # atomic on POSIX & Windows
+            atomic_replace(tmp_path, dest)  # atomic on POSIX & Windows (+retry a transient Windows AV handle)
         except BaseException:
             # Best-effort cleanup of the temp file on any failure.
             try:

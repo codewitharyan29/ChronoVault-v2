@@ -34,7 +34,11 @@ class LockTimeoutError(Exception):
     pass
 
 
-def _safe_unlink(path: Path, retries: int = 10, delay: float = 0.05) -> None:
+# retries budget raised 10 -> 50 (0.5s -> 2.5s): on the py3.12 windows-latest
+# CI runner Defender keeps a handle on a just-closed repo.lock long enough
+# that 0.5s of retries still raised here, crashing release() after the
+# snapshot had already been written. 2.5s clears it.
+def _safe_unlink(path: Path, retries: int = 50, delay: float = 0.05) -> None:
     """
     Found by an actual Windows user, not anticipated by design: plain
     os.unlink() raised PermissionError ("WinError 32: The process
@@ -169,6 +173,31 @@ class RepositoryLock:
                 return
             except FileExistsError:
                 pass
+            except PermissionError:
+                # Windows-only, and the cause of the flaky "8 launched ->
+                # 7 snapshots" failure on the py3.12 windows-latest CI
+                # cell: when the current holder's release() is mid-
+                # unlink(), repo.lock enters "delete pending" state (a
+                # handle is still open -- the holder's, or a virus
+                # scanner's), and O_CREAT|O_EXCL against it raises
+                # PermissionError, NOT FileExistsError. POSIX has no such
+                # state. This just means "the lock still exists, try
+                # again" -- so wait out the poll interval and retry
+                # within the same deadline; do NOT fall through to the
+                # stale-lock / unreadable-content handling below (that
+                # path deletes the lock file, which here would be
+                # stealing it from a live holder). On POSIX a
+                # PermissionError here is a real error (e.g. an
+                # unwritable .vault dir), so re-raise it.
+                if os.name != "nt":
+                    raise
+                if time.time() >= deadline:
+                    raise LockTimeoutError(
+                        f"Could not acquire repository lock within {self.timeout}s "
+                        f"(repo.lock stayed unopenable; another process holds it)"
+                    )
+                time.sleep(self.poll_interval)
+                continue
 
             held_by_pid = None
             try:
@@ -187,6 +216,22 @@ class RepositoryLock:
                     held_by_pid = parsed
             except (ValueError, FileNotFoundError):
                 pass
+            except PermissionError:
+                # Same Windows "delete pending" repo.lock as the O_EXCL
+                # branch above, hit here instead if the holder starts
+                # releasing between our failed open() and this read():
+                # the lock is still held, so wait and retry -- do NOT
+                # treat an unreadable-for-this-reason file as corrupt
+                # and break it. POSIX: a real error, re-raise.
+                if os.name != "nt":
+                    raise
+                if time.time() >= deadline:
+                    raise LockTimeoutError(
+                        f"Could not acquire repository lock within {self.timeout}s "
+                        f"(repo.lock stayed unreadable; another process holds it)"
+                    )
+                time.sleep(self.poll_interval)
+                continue
 
             if held_by_pid is None:
                 # THE ACTUAL BUG FIXED HERE: the previous version used
