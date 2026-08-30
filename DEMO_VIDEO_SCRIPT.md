@@ -1,261 +1,277 @@
 # ChronoVault v2 — Demo Video Script
 
-Target length: ~2:45. Every command below was actually run to produce
-the numbers shown — nothing here is invented. Run `bash
-scripts/setup_video_demo.sh` first (included alongside this script)
-to get an identical repository state before recording, so your own
-numbers match exactly.
+Target length ~5–6 minutes. One coherent engineering story, not a
+command tour. Every number shown is produced by an actual run — run
+`python chronovault.py demo demo-project` first, then `cd demo-project`,
+so your figures match.
 
-Screen recording + terminal, no editing needed beyond cutting dead
-air between commands. Narration in *italics*, on-screen text in
-`code blocks`, timing cumulative from 0:00.
+`vault` below = `python chronovault.py` (use `python`, not `python3`,
+on a stock Windows install).
+
+Narration in *italics*; on-screen commands in `code`.
 
 ---
 
-## [0:00 – 0:15] Cold open: zero-dependency proof
+## BEAT 1 — The problem  ·  0:00–0:25
 
-*"ChronoVault is a content-addressable snapshot engine, built entirely
-from Python's standard library — zero third-party dependencies. Not
-an assertion — here's the proof, checked against the actual source
-right now."*
+*"A backup tells you a copy exists. It doesn't tell you the copy is
+intact, or that you can actually get your data back. ChronoVault is a
+snapshot engine where **recovery is verifiable** — built entirely from
+the Python standard library, so there's no storage engine to trust but
+this one."*
+
+---
+
+## BEAT 2 — Zero dependency, proven  ·  0:25–0:55
 
 ```
-$ make verify-deps
+$ python scripts/check_dependencies.py
 ```
 ```
+Dynamic imports (importlib / __import__ with a literal name):
+  (none)
+Subprocess / os.system executables observed:
+  python           the interpreter itself
 External dependencies found:
-
   NONE
-
 Status: ZERO DEPENDENCY VERIFIED
 ```
 
-*"Every mechanism you're about to see — hashing, compression,
-deduplication, delta encoding, concurrency — is implemented in this
-repository, not imported."*
+*"Every import in every file is parsed from the AST — including
+function-body imports, `importlib`, and `__import__`. No third-party
+package, static or dynamic."*
+
+```
+$ python -I scripts/_isolated_entry.py verify
+```
+
+*"And it runs under `python -I` — no site-packages, no PYTHONPATH, no
+working-directory tricks."*
 
 ---
 
-## [0:15 – 0:40] Snapshot + live dedup numbers
-
-*"Here's a small project — five modules, one of them duplicated on
-disk. Snapshotting it shows exactly what got deduplicated, live."*
+## BEAT 3 — The snapshot model  ·  0:55–1:45
 
 ```
+$ vault init .
 $ vault snapshot -m "initial project"
 ```
 ```
 ✓ Snapshot created
-
-  ID:              1
-  Files:           6
-  New objects:     5
-  Reused objects:  1
-  Original size:   20.6 KB
-  Stored size:     2.3 KB
-  Storage saved:   89%
+  ID: 1   Files: 11   New objects: 10   Reused objects: 1
 ```
 
-*"Six files, five new objects — the sixth was a byte-identical
-duplicate, deduplicated automatically. 89% storage saved, real
-compression and dedup working together."*
+*"Eleven files, ten new objects — the eleventh is a byte-identical
+duplicate on disk, deduplicated automatically. Here's the model, made
+visible:"*
+
+```
+$ vault show 1
+```
+```
+Snapshot 1 — "initial project"
+  Parent:     (none — first snapshot)
+  Root tree:  b9b418f9a8ff...
+  Files:      11
+
+  PATH                     KIND   SIZE     OBJECT
+  src/utils.py             file   1.3 KB   e8876ce159538f53...
+  src/legacy_utils.py      file   1.3 KB   e8876ce159538f53...
+  ...
+```
+
+*"`src/utils.py` and `src/legacy_utils.py` are different paths pointing
+at **the same object hash** — same content, stored once. That's content
+addressing. Directories are content-addressed objects too."*
+
+```
+$ vault status --json
+```
+
+*"Every read-only command has a `--json` mode for automation — same
+data, deterministic keys."*
 
 ---
 
-## [0:40 – 1:05] Modify → snapshot → diff
-
-*"Now I edit one file and snapshot again."*
+## BEAT 4 — Understanding change  ·  1:45–2:30
 
 ```
-$ vim src/module_1.py   # (or just show the edit already made)
-$ vault snapshot -m "bug fix in module_1"
+$ vim src/database.py        # (edit already made)
+$ vault snapshot -m "tune connection pool"
 ```
 ```
 ✓ Snapshot created
-
-  ID:              2
-  New objects:     1
-  Reused objects:  5
+  ID: 2   New objects: 1   Reused objects: 10
 ```
 
-*"Only ONE new object — the other five files didn't change, so
-they're reused, not re-stored. That's incremental snapshotting, not
-a full copy every time."*
+*"One new object. The ten unchanged files are referenced, not
+re-stored."*
 
 ```
 $ vault diff 1 2
+$ vault explain 2
 ```
-```
-Snapshot 1 → Snapshot 2
 
-  ~ src/module_1.py
-
-0 added, 1 modified, 0 removed, 5 unchanged
-```
+*"`diff` is a real tree diff. `explain` shows the dedup and compression
+this snapshot actually achieved."*
 
 ---
 
-## [1:05 – 1:25] Restore
-
-*"Preview first — see exactly what would change, before anything
-happens."*
+## BEAT 5 — Rename-aware history  ·  2:30–3:05
 
 ```
-$ vault restore 1 --preview
+$ git mv src/database.py src/db.py      # or: Rename-Item / mv
+$ vault snapshot -m "rename database module"
+$ vault log src/db.py
 ```
 ```
-Restore Preview — Snapshot 1
+History for src/db.py
+  Snapshot 1   219b7a53...   "initial project"   (as src/database.py)
+  Snapshot 2   4c1e90a1...   "tune connection pool"   (as src/database.py)
+  Snapshot 3   4c1e90a1...   "rename database module"
+3 entries across a rename (also known as: src/database.py).
+```
 
-  ~ src/module_1.py
-
-✓ Integrity check passed
-No changes applied (--preview).
-```
-
-*"Then the real restore, with an explicit confirmation."*
-
-```
-$ vault restore 1
-Type RESTORE to continue: RESTORE
-```
-```
-✓ Restoration completed — 1 file(s) restored (3.4 KB)
-```
+*"History follows the file across the rename — matched by content and
+history, not by guessing from the filename. A pure rename creates no
+new blob: `vault show 3` proves `src/db.py` has the exact object
+`src/database.py` had in snapshot 2."*
 
 ---
 
-## [1:25 – 1:50] Corruption → verify catches it
-
-*"Now the safety story. I'm going to corrupt one stored object
-directly on disk — flip one byte — simulating a disk fault or a bad
-sector."*
+## BEAT 6 — Recovery safety  ·  3:05–4:00
 
 ```
-$ python3 -c "corrupt_one_byte('.vault/objects/...')"
 $ vault verify
-```
-```
-Checking 10 object(s)...
+✓ All objects verified   Repository healthy.
 
-✗ 1 corrupted object(s) found:
-    1cf6ac508a1a...
-
+$ python3 -c "corrupt_one_byte('.vault/objects/…')"   # flip one real byte
+$ vault verify
+✗ 1 corrupted object(s) found
 Repository integrity FAILED.
 ```
 
-*"Detected immediately, by hash re-verification — not a guess, a
-cryptographic check. And if I try to restore something that needs
-that object—"*
+*"Detected by re-hashing — a cryptographic check, not a guess."*
 
 ```
-$ vault restore 1
+$ vault recover-check 3
+Snapshot 3 is NOT fully recoverable
+  ✗ src/db.py   <hash>   object is present but fails hash/decode verification
 ```
+
+*"`recover-check` answers one question before you touch anything: could
+this snapshot actually be restored right now? It names the exact fault."*
+
 ```
+$ vault restore 3 --preview      # shows the plan, writes nothing
+$ vault restore 3
 ⚠ Integrity check failed — restore aborted before any changes were made.
 ```
 
-*"It refuses. Nothing gets written. That's the whole point — silently
-restoring corrupted data would be worse than refusing."*
+*"It refuses. Nothing is written. Silently restoring corrupt data would
+be worse than stopping."* (Restore the object, show a clean `restore`.)
 
 ---
 
-## [1:50 – 2:10] GC actually reclaiming
-
-*"Delete an old snapshot, then garbage-collect — and see it actually
-free real disk space, not just print a message."*
-
-```
-$ vault snapshot-rm 1
-$ vault gc
-```
-```
-✓ Collected 2 unreachable object(s)
-  Reclaimed: 319 B
-```
-
-*"Two objects, gone, because nothing references them anymore.
-Reachability is computed by walking every live snapshot's tree —
-anything not reachable that way is safe to delete."*
-
----
-
-## [2:10 – 2:35] Pack files + delta compression
-
-*"Now consolidation. `vault pack` finds files that evolved from an
-earlier version — using real tree diffs, not name-matching guesses
-— and stores the difference instead of the whole file again."*
+## BEAT 7 — Storage engineering  ·  4:00–4:40
 
 ```
 $ vault pack
-```
-```
-✓ Packed 11 object(s) in 0.003s
-  Full entries:  9
-  Delta entries: 2  (saved 311 B vs. storing them whole)
-  Delta bases are now protected automatically by 'vault gc'
-```
+✓ Packed N object(s)
+  Full entries: …   Delta entries: …  (saved … vs. storing whole)
 
-*"And critically — the repository is still fully verifiable and
-restorable after packing."*
-
-```
 $ vault verify
+✓ All objects verified   Repository healthy.
+
+$ vault snapshot-rm 1
+$ vault gc
+✓ Collected M unreachable object(s)   Reclaimed: … B
 ```
-```
-✓ All 11 objects verified
-Repository healthy.
-```
+
+*"`pack` finds files that evolved from an earlier version using real
+tree diffs and stores the delta. GC walks every live snapshot's tree —
+and it's delta-aware: it will never drop a base object a surviving
+snapshot still needs. `verify` stays green through all of it."*
 
 ---
 
-## [2:35 – 2:45] `vault serve`
-
-*"One more thing — a local web inspector, zero setup."*
+## BEAT 8 — The thesis, as one executable proof  ·  4:40–5:15
 
 ```
-$ vault serve
+$ python scripts/content_addressing_proof.py
+```
+```
+CONTENT-ADDRESSING PROOF
+[PASS] identical content -> identical object hash
+[PASS] two paths with equal bytes share one object
+[PASS] unchanged files across snapshots reference the same object
+[PASS] modification creates a new object; unchanged files keep theirs
+[PASS] pack preserves every object's logical identity
+[PASS] delta-encoded objects reconstruct the original bytes exactly
+[PASS] GC keeps reachable shared objects intact
+[PASS] verify confirms full integrity after pack + gc
+RESULT: PASS
 ```
 
-*(Show the browser at localhost:8080 — snapshot list, status,
-verify-from-the-browser. 5-8 seconds of B-roll, no narration needed.)*
+*"That's the whole design in one command — it runs the real storage
+operations in a throwaway directory and checks eight invariants."*
 
 ---
 
-## [2:45 – 2:55] Close: why this isn't just another Git clone
-
-*"The point was never to copy Git's feature set — it's what building
-the storage engine from scratch makes possible. Git has to GUESS
-which earlier file a new one evolved from, using name and size. Here,
-a real tree diff PROVES it. Measured against a Git-style heuristic on
-identical data: this approach was right 100% of the time, by
-construction. That's the difference between building your own
-storage engine and copying one."*
+## BEAT 9 — Engineering proof  ·  5:15–5:40
 
 ```
 $ make test
-```
-```
-Ran 204 tests in 42.6s
-
-OK (skipped=2)
+Ran <N> tests … OK (skipped=2)
 ```
 
-*"204 tests (202 passing, 2 skipped — a Windows-only symlink-privilege
-limitation), zero dependencies, and everything you just saw, you can
-run yourself, right now."*
+*"Full suite on Python 3.11 and 3.14, Ubuntu and Windows in CI. The two
+skips are a Windows symlink-privilege limitation — documented, not
+hidden. Plus a live concurrency stress test and a security demo."*
+
+```
+$ python chronovault.py stress-test --processes 8
+  Processes launched: 8   Snapshots created: 8   Unique IDs: 8   Result: PASS
+```
+
+---
+
+## BEAT 10 — Bonuses  ·  5:40–6:00
+
+```
+$ python scripts/build_single_file.py      # → dist/chronovault_single.py, runs standalone
+$ python scripts/prove_reproducible.py     # two independent builds, identical SHA-256
+$ python scripts/benchmark_vs_diskcache.py # Package Killer: vs diskcache, in a throwaway venv
+```
+
+*"Single-file build, reproducible build, a fair comparison against
+`diskcache`, and STDLIB.md documenting every avoided package. The
+diskcache package is installed only inside a temporary venv for the
+benchmark — never a runtime dependency."*
+
+---
+
+## BEAT 11 — One command  ·  6:00–6:15
+
+```
+$ python scripts/judge_mode.py
+          CHRONOVAULT: VERIFIED ✓
+```
+
+*(Optionally: `python scripts/judge_mode.py --json` for the machine
+scorecard.)*
+
+*"One command runs all of it as real subprocesses. This isn't a toy
+key-value store — it's a small storage engine, built from the standard
+library, whose important claims you can verify yourself."*
 
 ---
 
 ## Recording notes
 
-- Every number above is real, captured from an actual run. If you
-  re-run the setup script, your exact byte counts may differ slightly
-  (compression is deterministic, but file content should match
-  closely enough that the percentages land the same).
-- If you need to cut to 2:00: drop the diff segment (1:05) and the
-  `--preview` step (fold straight into the real restore) — saves
-  ~25s without losing any of the 8 required beats.
-- The corruption demo needs a real Python one-liner to flip a byte —
-  don't fake this with `sed`; the exact hash that gets flagged should
-  match what `vault verify` reports, which only happens with a
-  genuine bit-flip on the actual stored file.
+- Numbers drift as the suite grows — say "the live count" and let
+  `make test` / `judge_mode` show it, rather than freezing a figure.
+- The corruption beat needs a genuine one-byte flip on a real stored
+  object (a Python one-liner), so the hash `verify` flags matches.
+- If you must cut to ~4:30: fold BEAT 4's `explain` into `diff`, and
+  drop the `--preview` line in BEAT 6.

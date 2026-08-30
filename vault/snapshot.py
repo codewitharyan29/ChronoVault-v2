@@ -29,7 +29,6 @@ engine" problem pickle/sqlite would be.
 from __future__ import annotations
 
 import json
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -452,3 +451,20 @@ class SnapshotEngine:
 
     def load_tree(self, tree_hash: str) -> list[TreeEntry]:
         return deserialize_tree(self.store.get(tree_hash))
+
+    def walk_tree_entries(self, tree_hash: str, prefix: str = ""):
+        """
+        Yield (path, kind, obj_hash) for every entry reachable from
+        `tree_hash`, depth-first, sorted by name at each level so the
+        order is a pure function of content. `kind` is "dir" for a
+        sub-tree object and "file" for a blob. Strictly read-only --
+        composes load_tree(), adds no storage logic. Backs
+        `vault show` and scripts/content_addressing_proof.py.
+        """
+        for entry in sorted(self.load_tree(tree_hash), key=lambda e: e.name):
+            path = f"{prefix}{entry.name}"
+            if entry.kind == "tree":
+                yield (path, "dir", entry.obj_hash)
+                yield from self.walk_tree_entries(entry.obj_hash, f"{path}/")
+            else:
+                yield (path, "file", entry.obj_hash)

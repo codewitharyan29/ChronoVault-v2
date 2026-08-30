@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import sys
 import time
 from pathlib import Path
@@ -134,6 +135,22 @@ def _human_bytes(n: int) -> str:
     return f"{size:.1f} GB"
 
 
+def _wants_json(args: argparse.Namespace) -> bool:
+    """True when the user passed --json. Read-only commands check this
+    and emit a machine-readable document INSTEAD of the human report;
+    the human output path is left byte-for-byte unchanged (the demo
+    depends on it)."""
+    return bool(getattr(args, "json", False))
+
+
+def _emit_json(payload: dict, exit_code: int = 0) -> int:
+    """Print one deterministic JSON document (sorted keys, 2-space
+    indent) and return the same exit code the human path would use, so
+    `--json` never changes a command's success/failure semantics."""
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return exit_code
+
+
 # ---------------------------------------------------------------------------
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -211,6 +228,19 @@ def cmd_list(args: argparse.Namespace) -> int:
     engine, _ = _engine_and_source(args)
     snapshots = engine.list_snapshots()
 
+    if _wants_json(args):
+        return _emit_json({
+            "snapshots": [
+                {
+                    "id": r.id,
+                    "message": r.message,
+                    "timestamp": r.timestamp,
+                    "files": r.stats.files,
+                }
+                for r in sorted(snapshots, key=lambda r: r.id)
+            ]
+        })
+
     if not snapshots:
         print("No snapshots yet. Run 'vault snapshot' to create one.")
         return 0
@@ -234,6 +264,16 @@ def cmd_diff(args: argparse.Namespace) -> int:
     s_a = engine.load_snapshot(id_a)
     s_b = engine.load_snapshot(id_b)
     result = diff_trees(engine, s_a.root_tree_hash, s_b.root_tree_hash)
+
+    if _wants_json(args):
+        return _emit_json({
+            "from": id_a,
+            "to": id_b,
+            "added": sorted(result.added),
+            "modified": sorted(result.modified),
+            "removed": sorted(result.removed),
+            "unchanged_count": result.unchanged_count,
+        })
 
     print(f"Snapshot {args.snapshot_a} → Snapshot {args.snapshot_b}")
     print()
@@ -313,6 +353,18 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     quarantined = list(getattr(store, "quarantined_packs", []))
 
+    if _wants_json(args):
+        healthy = not corrupted and not quarantined
+        return _emit_json({
+            "objects_checked": len(all_hashes),
+            "corrupted": sorted(corrupted),
+            "quarantined_packs": [
+                {"name": qp.name, "reason": qp.reason}
+                for qp in sorted(quarantined, key=lambda qp: qp.name)
+            ],
+            "result": "healthy" if healthy else "failed",
+        }, exit_code=0 if healthy else 1)
+
     print(f"Checking {len(all_hashes)} object(s)...")
     print()
     if corrupted:
@@ -345,6 +397,27 @@ def cmd_recover_check(args: argparse.Namespace) -> int:
     engine, _ = _engine_and_source(args)
     snap_id = resolve_snapshot_ref(engine, args.snapshot_id)
     report = check_snapshot_recoverable(engine, snap_id)
+
+    if _wants_json(args):
+        return _emit_json({
+            "snapshot": report.snap_id,
+            "message": report.message,
+            "root_tree_hash": report.root_tree_hash,
+            "metadata_ok": report.metadata_ok,
+            "objects_checked": report.objects_checked,
+            "packed_objects": report.packed_objects,
+            "delta_dependencies": report.delta_dependencies,
+            "quarantined_packs": [
+                {"name": name, "reason": reason}
+                for name, reason in report.quarantined_packs
+            ],
+            "issues": [
+                {"where": i.where, "object": i.obj_hash, "detail": i.detail}
+                for i in report.issues
+            ],
+            "recoverable": report.recoverable,
+        }, exit_code=0 if report.recoverable else 1)
+
     print(format_recover_report(report))
     return 0 if report.recoverable else 1
 
@@ -422,6 +495,16 @@ def cmd_info(args: argparse.Namespace) -> int:
     from vault.objects import FORMAT_VERSION, HASH_ALGO
     engine, source_dir = _engine_and_source(args)
     status = compute_status(engine)
+
+    if _wants_json(args):
+        return _emit_json({
+            "repository": str(engine.vault_dir),
+            "format_version": int.from_bytes(FORMAT_VERSION, "big"),
+            "hash_algorithm": HASH_ALGO.upper(),
+            "object_encoding": "zlib-or-raw-per-object",
+            "snapshots": status.snapshot_count,
+            "objects": status.object_count,
+        })
 
     print(f"Repository:       {engine.vault_dir}")
     print(f"Format version:   {int.from_bytes(FORMAT_VERSION, 'big')}")
@@ -570,6 +653,18 @@ def cmd_log(args: argparse.Namespace) -> int:
         index.rebuild_from_scratch(engine)
 
     lineage = index.lineage_for(args.path_arg)
+
+    if _wants_json(args):
+        also_known_as = sorted({p for _, _, p in lineage if p != args.path_arg})
+        return _emit_json({
+            "path": args.path_arg,
+            "entries": [
+                {"snapshot": snap_id, "blob_hash": blob_hash, "path_at": path_at}
+                for snap_id, blob_hash, path_at in lineage
+            ],
+            "also_known_as": also_known_as,
+        }, exit_code=0 if lineage else 1)
+
     if not lineage:
         print(f"No history found for '{args.path_arg}'.")
         print("(The path may not exist in any snapshot.)")
@@ -602,6 +697,22 @@ def cmd_status(args: argparse.Namespace) -> int:
     engine, _ = _engine_and_source(args)
     status = compute_status(engine)
 
+    if _wants_json(args):
+        last = status.last_snapshot
+        return _emit_json({
+            "snapshots": status.snapshot_count,
+            "objects": status.object_count,
+            "total_snapshot_data_bytes": status.total_snapshot_data_bytes,
+            "stored_on_disk_bytes": status.total_stored_bytes,
+            "last_snapshot": None if last is None else {
+                "id": last.id,
+                "message": last.message,
+                "timestamp": last.timestamp,
+            },
+            "integrity_ok": status.integrity_ok,
+            "corrupted_count": status.corrupted_count,
+        })
+
     print("ChronoVault Repository")
     print()
     print(f"  Snapshots:       {status.snapshot_count}")
@@ -624,6 +735,21 @@ def cmd_explain(args: argparse.Namespace) -> int:
     e = explain_snapshot(engine, snap_id)
     r = e.record
 
+    if _wants_json(args):
+        return _emit_json({
+            "id": r.id,
+            "message": r.message,
+            "files": r.stats.files,
+            "new_objects": r.stats.new_objects,
+            "reused_objects": r.stats.reused_objects,
+            "dedup_ratio_pct": e.dedup_ratio_pct,
+            "original_bytes": r.stats.original_bytes,
+            "stored_bytes": r.stats.compressed_bytes,
+            "storage_saved_bytes": e.storage_saved_bytes,
+            "storage_saved_pct": e.storage_saved_pct,
+            "parent": r.parent,
+        })
+
     print(f"Snapshot {r.id}" + (f' — "{r.message}"' if r.message else ""))
     print()
     print(f"  Files:              {r.stats.files}")
@@ -643,6 +769,62 @@ def cmd_tag(args: argparse.Namespace) -> int:
     snap_id = resolve_snapshot_ref(engine, args.snapshot_id)
     tag_snapshot(engine, snap_id, args.name)
     print(f"✓ Tagged snapshot {snap_id} as '{args.name}'")
+    return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    """Read-only: every path in a snapshot with its entry kind, logical
+    (uncompressed) size, and the content-addressed object hash that
+    stores it -- so the storage model is directly visible instead of
+    inferred from `diff`/`explain`. Composes load_snapshot() +
+    SnapshotEngine.walk_tree_entries(); adds no storage logic and
+    mutates nothing. A missing snapshot id / corrupt object surfaces as
+    the usual clean VaultError (see main())."""
+    engine, _ = _engine_and_source(args)
+    snap_id = resolve_snapshot_ref(engine, args.snapshot_id)
+    record = engine.load_snapshot(snap_id)
+    store = engine.store
+
+    rows = []  # (path, kind, size|None, obj_hash) -- deterministic order
+    for path, kind, obj_hash in engine.walk_tree_entries(record.root_tree_hash):
+        size = None if kind == "dir" else len(store.get(obj_hash))
+        rows.append((path, kind, size, obj_hash))
+
+    if _wants_json(args):
+        return _emit_json({
+            "id": record.id,
+            "parent": record.parent,
+            "timestamp": record.timestamp,
+            "message": record.message,
+            "root_tree_hash": record.root_tree_hash,
+            "stats": {
+                "files": record.stats.files,
+                "new_objects": record.stats.new_objects,
+                "reused_objects": record.stats.reused_objects,
+                "original_bytes": record.stats.original_bytes,
+                "compressed_bytes": record.stats.compressed_bytes,
+            },
+            "entries": [
+                {"path": p, "kind": k, "size": s, "object": h}
+                for p, k, s, h in rows
+            ],
+        })
+
+    when = datetime.datetime.fromtimestamp(record.timestamp).strftime("%Y-%m-%d %H:%M")
+    print(f"Snapshot {record.id}" + (f' — "{record.message}"' if record.message else ""))
+    print()
+    parent = record.parent if record.parent is not None else "(none — first snapshot)"
+    print(f"  Parent:     {parent}")
+    print(f"  Timestamp:  {when}")
+    print(f"  Root tree:  {record.root_tree_hash}")
+    print(f"  Files:      {record.stats.files}")
+    print(f"  Objects:    {record.stats.new_objects} new, "
+          f"{record.stats.reused_objects} reused (this snapshot)")
+    print()
+    print(f"  {'PATH':<40} {'KIND':<5} {'SIZE':>9}  OBJECT")
+    for p, k, s, h in rows:
+        size_str = "-" if s is None else _human_bytes(s)
+        print(f"  {p:<40} {k:<5} {size_str:>9}  {h[:16]}...")
     return 0
 
 
@@ -702,13 +884,6 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_not_yet_implemented(name: str):
-    def handler(args: argparse.Namespace) -> int:
-        print(f"'{name}' is not implemented yet — coming in the next build step.")
-        return 1
-    return handler
-
-
 # ---------------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -716,7 +891,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="vault",
         description="ChronoVault — a zero-dependency content-addressable snapshot engine.",
     )
-    parser.add_argument("--version", action="version", version="ChronoVault 1.0.0")
+    parser.add_argument("--version", action="version", version="ChronoVault 2.0.0")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_init = sub.add_parser("init", help="Initialize a new ChronoVault repository")
@@ -735,12 +910,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_list = sub.add_parser("list", help="List snapshot history")
     p_list.add_argument("path", nargs="?", default=".")
+    p_list.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of the text report")
     p_list.set_defaults(func=cmd_list)
 
     p_diff = sub.add_parser("diff", help="Show changes between two snapshots")
     p_diff.add_argument("snapshot_a", help="Snapshot id or tag name")
     p_diff.add_argument("snapshot_b", help="Snapshot id or tag name")
     p_diff.add_argument("--path", default=".")
+    p_diff.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of the text report")
     p_diff.set_defaults(func=cmd_diff)
 
     p_restore = sub.add_parser("restore", help="Restore the working directory to a snapshot")
@@ -751,6 +928,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_verify = sub.add_parser("verify", help="Verify integrity of all stored objects")
     p_verify.add_argument("path", nargs="?", default=".")
+    p_verify.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of the text report")
     p_verify.set_defaults(func=cmd_verify)
 
     p_recover_check = sub.add_parser(
@@ -759,6 +937,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_recover_check.add_argument("snapshot_id", help="Snapshot id or tag name")
     p_recover_check.add_argument("--path", default=".")
+    p_recover_check.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of the text report")
     p_recover_check.set_defaults(func=cmd_recover_check)
 
     p_gc = sub.add_parser("gc", help="Garbage-collect unreachable objects")
@@ -772,6 +951,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_info = sub.add_parser("info", help="Show repository format version and identity")
     p_info.add_argument("path", nargs="?", default=".")
+    p_info.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of the text report")
     p_info.set_defaults(func=cmd_info)
 
     p_benchmark = sub.add_parser("benchmark", help="Run real performance measurements and print a report")
@@ -789,16 +969,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_log = sub.add_parser("log", help="Show the change history of a single path")
     p_log.add_argument("path_arg", metavar="PATH", help="File path to show history for")
     p_log.add_argument("--path", default=".")
+    p_log.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of the text report")
     p_log.set_defaults(func=cmd_log)
 
     p_status = sub.add_parser("status", help="Fast repository status overview")
     p_status.add_argument("path", nargs="?", default=".")
+    p_status.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of the text report")
     p_status.set_defaults(func=cmd_status)
 
     p_explain = sub.add_parser("explain", help="Explain the storage/dedup details of a snapshot")
     p_explain.add_argument("snapshot_id", help="Snapshot id or tag name")
     p_explain.add_argument("--path", default=".")
+    p_explain.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of the text report")
     p_explain.set_defaults(func=cmd_explain)
+
+    p_show = sub.add_parser("show", help="List every path in a snapshot with its size and content-addressed object hash")
+    p_show.add_argument("snapshot_id", help="Snapshot id or tag name")
+    p_show.add_argument("--path", default=".")
+    p_show.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of the text report")
+    p_show.set_defaults(func=cmd_show)
 
     p_tag = sub.add_parser("tag", help="Name a snapshot for easy reference")
     p_tag.add_argument("snapshot_id", help="Snapshot id or tag name")
@@ -826,7 +1015,13 @@ def main(argv=None) -> int:
     try:
         return args.func(args)
     except VaultError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        # In --json mode a caller is parsing stdout, so the error has to
+        # be machine-readable too. Human mode is unchanged: message to
+        # stderr, exit 1.
+        if getattr(args, "json", False):
+            print(json.dumps({"error": str(e)}, indent=2, sort_keys=True))
+        else:
+            print(f"Error: {e}", file=sys.stderr)
         return 1
 
 
