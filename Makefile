@@ -16,7 +16,7 @@ demo:
 	@echo "Demo repo ready at ./demo-project -- cd in and try 'vault status', 'vault serve', etc."
 
 verify-deps:
-	python3 scripts/check_dependencies.py
+	python3 scripts/check_dependencies.py | tee deps-proof.txt
 
 serve:
 	python3 chronovault.py serve

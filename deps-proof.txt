@@ -1,10 +1,11 @@
-Scanning 56 Python file(s)...
+﻿Scanning 69 Python file(s)...
 
-Standard library modules used:
+Standard library modules imported:
   __future__           ✓ stdlib
   argparse             ✓ stdlib
   ast                  ✓ stdlib
   bisect               ✓ stdlib
+  builtins             ✓ stdlib
   contextlib           ✓ stdlib
   ctypes               ✓ stdlib
   dataclasses          ✓ stdlib
@@ -32,6 +33,18 @@ Standard library modules used:
   urllib               ✓ stdlib
   venv                 ✓ stdlib
   zlib                 ✓ stdlib
+
+Dynamic imports (importlib / __import__ with a literal name):
+  (none)
+
+Subprocess / os.system executables observed:
+  <dynamic>        executable built at runtime -- literal args still scanned below
+  python           the interpreter itself
+
+Package-installer invocations (pip / uv / easy_install / ...):
+  scripts/benchmark_vs_diskcache.py:303
+      -m pip install --quiet --disable-pip-version-check diskcache
+      -> benchmark-only, into a throwaway venv
 
 External dependencies found:
 

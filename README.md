@@ -2,7 +2,7 @@
 
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
-![Tests](https://img.shields.io/badge/tests-247%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-279%20(277%20pass%2C%202%20skip)-brightgreen)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 [![CI](https://github.com/codewitharyan29/ChronoVault-v2/actions/workflows/test.yml/badge.svg)](https://github.com/codewitharyan29/ChronoVault-v2/actions/workflows/test.yml)
 
@@ -34,7 +34,7 @@ Delete everything, get it back exactly. Corrupt one object, and the
 system refuses to silently restore bad data — it tells you and stops.
 
 ```
-✓ 249 tests            ✓ Concurrent-process safe
+✓ 279 tests            ✓ Concurrent-process safe
 ✓ Corruption-safe restore   ✓ Tree-diff-derived delta compression
 ```
 
@@ -228,7 +228,9 @@ Security, live attacks      → make security-demo
 Differentiation, live       → make demo-differentiation
 Single-file build           → make verify-single
 Package Killer benchmark    → python scripts/benchmark_vs_diskcache.py
+Content-addressing proof    → python scripts/content_addressing_proof.py
 Full test suite             → make test
+Recorded-demo regression    → python -m unittest tests.test_demo_regression
 End-to-end demo             → make demo-v2
 Video demo script            → DEMO_VIDEO_SCRIPT.md
 Security proof (written)     → SECURITY.md
@@ -438,7 +440,7 @@ data, and here is the proof it no longer can."
 
 ```bash
 make verify-deps    # confirm zero external dependencies, from source
-make test            # full 249-test suite (247 pass, 2 skipped -- Windows symlink-privilege limitation, not a failure)
+make test            # full 279-test suite (277 pass, 2 skipped -- Windows symlink-privilege limitation, not a failure)
 make demo-v2          # reproduce the v2 demo and benchmark numbers above
 ```
 
@@ -449,10 +451,12 @@ not these ones.
 
 ### Testing
 
-249 tests (247 passing, 2 skipped — a Windows-only symlink-privilege
+279 tests (277 passing, 2 skipped — a Windows-only symlink-privilege
 limitation, not a failure), `python3 -m unittest discover tests -v`
-(`python` instead of `python3` on Windows). Covers everything v1
-covered, plus:
+(`python` instead of `python3` on Windows). The authoritative count is
+whatever `python -m unittest discover tests` and `scripts/judge_mode.py`
+report on your machine — this number is kept in sync with them, not
+maintained independently. Covers everything v1 covered, plus:
 
 - **The actual disaster scenario for delta-aware GC**, proven in two
   stages: first confirming v1's unmodified GC *would* delete a needed
@@ -566,6 +570,7 @@ write to temp file, atomic rename into place
 | `status` | Fast repository overview |
 | `info` | Repository format version, hash algorithm, object encoding |
 | `explain <id>` | Dedup/compression breakdown for one snapshot |
+| `show <id>` *(v2)* | **Read-only** listing of every path in a snapshot with its entry kind, logical size, and the content-addressed object hash storing it — makes dedup directly visible (two paths, one hash) |
 | `tag <id> <name>` | Name a snapshot for easy reference |
 | `log <path>` *(v2)* | History of one file across all snapshots, following content-identical renames — 574x faster indexed lookup (0.0169 ms vs. 9.68 ms on the benchmark workload) |
 
@@ -588,6 +593,15 @@ write to temp file, atomic rename into place
 | `serve` | Local web Repository Inspector |
 
 Any command that takes a snapshot id also accepts a tag name in its place.
+
+**Machine-readable output:** `status`, `list`, `info`, `diff`,
+`explain`, `show`, `log`, `verify` and `recover-check` accept `--json`,
+which replaces the human report with one deterministic JSON document
+(sorted keys, stable list ordering) and keeps the same exit code.
+Default output is unchanged — `--json` is strictly opt-in. Example:
+`vault verify --json` → `{"objects_checked": 16, "corrupted": [], "quarantined_packs": [], "result": "healthy"}`.
+`scripts/judge_mode.py --json` emits the same kind of scorecard for the
+whole verification suite.
 
 ### Why not Git?
 
@@ -792,20 +806,23 @@ chronovault/
 |-- chronovault.py         entry point
 |-- Makefile
 |-- scripts/
-|   |-- demo_v2.sh          one-command end-to-end v2 demo
-|   |-- benchmark.py        v1's large-scale benchmark script
-|   `-- check_dependencies.py
+|   |-- demo_v2.sh                     one-command end-to-end v2 demo
+|   |-- judge_mode.py                  aggregates every proof (--json for a scorecard)
+|   |-- content_addressing_proof.py    executable proof of the core thesis
+|   |-- benchmark.py                   v1's large-scale benchmark script
+|   |-- benchmark_vs_diskcache.py      Package Killer comparison (throwaway venv)
+|   `-- check_dependencies.py          AST + dynamic-import + subprocess-exec audit
 |-- vault/
-|   |-- objects.py          content-addressable object store (v1, unmodified)
-|   |-- snapshot.py         tree walking, snapshot records (v1, unmodified)
+|   |-- objects.py          content-addressable object store (+v2 Windows atomic-write retry)
+|   |-- snapshot.py         tree walking, snapshot records (+v2 Windows retry, walk_tree_entries)
 |   |-- diff.py             shared diff engine (v1, unmodified)
 |   |-- restore.py          restore with preview/confirm/integrity check (v1)
 |   |-- gc.py               mark-and-sweep GC (v1, unmodified)
 |   |-- reporting.py        status, explain, tags (v1)
 |   |-- demo.py             sample repository generator (v1)
 |   |-- inspector.py        vault serve (v1)
-|   |-- cli.py              argparse entry point -- the only v1 file v2 changes,
-|   |                       since that's where every command gets wired
+|   |-- cli.py              argparse entry point -- every command wired here;
+|   |                       v2 adds `show` + opt-in `--json` on read-only commands
 |   `-- experimental/
 |       |-- lock.py                repository-wide locking
 |       |-- packfile.py, packfile_v2.py   pack file formats (v1 exploration + fix)
@@ -816,7 +833,7 @@ chronovault/
 |       |-- path_history.py        the `vault log` index
 |       |-- benchmark_cmd.py       powers `vault benchmark`
 |       `-- stress_test_cmd.py     powers `vault stress-test`
-|-- tests/                  249 tests, stdlib unittest only
+|-- tests/                  279 tests, stdlib unittest only
 |-- STDLIB.md               every stdlib-for-package substitution (v1, still accurate)
 |-- FORMAT.md               binary object/snapshot format (v1, still accurate)
 |-- ARCHITECTURE.md         v1's original per-layer breakdown
